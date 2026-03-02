@@ -1,0 +1,31 @@
+#Copyright 2025-26 Beta ORI Inc. Canada All Rights Reserved.
+# Awase Khirni Syed 
+# V2 - FOCUS CAPITAL COMMUNITY BANKING 
+
+Modules (Implementation in Progress)
+#Foundation layer
+1. Unified Identity & Zero Trust Auth
+2. Granualar RBAC Engine 
+3. Audit Trail immutable Ledger 
+# Core Banking Layer 
+4. General Ledger Engine 
+5. Deposit Account Management 
+6. Loan Origination & Servicing Systems 
+7. Customer Information File (CIF)
+8. Funds Transfer Hub 
+9. Reconciliation Engine 
+10. Regulatory Reporting Enigne 
+11. Capital Adequacy Calculator 
+12. Liquidity Risk Manager 
+13. Interest & Fee Engine (Halal Compliant)
+14. Statement Generation System
+15. Check Processing System 
+16. Card Management System 
+17. OCC Fintech Charter Compliance Module 
+
+#Data Intelligence Layer 
+18. Universal Data Integestion Framework 
+19. Data Quality Framewrok 
+20. Enterprise Data Dictionary 
+21. Data Lifecycle Management 
+22. Data Governance Orchestrator
