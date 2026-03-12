@@ -34443,6 +34443,1265 @@ ORDER BY action_priority, risk_level
 LIMIT 20;
 
 
+-- =============================================================================
+-- Serial No: 101 | TABLE: hr.time_off_types
+-- Description: Master table for time-off type definitions and accrual rules
+-- Business Case: This table serves as the central repository for all time-off types
+--   within the organization, enabling accurate accrual calculations, balance
+--   tracking, and compliance with labor regulations. Time-off types are critical
+--   for managing employee entitlements, tracking usage patterns, and supporting
+--   workforce planning.
+-- KPI: Time-off type coverage rate, Accrual calculation accuracy,
+--      Balance tracking correctness, Policy compliance rate
+-- Feature Reference: F-TO-001, F-TO-002, F-HR-003
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hr.time_off_types (
+    time_off_type_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    time_off_type_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (time_off_type_code ~ '^[A-Z0-9_-]{3,50}$'),
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    category VARCHAR(50) NOT NULL
+        CHECK (category IN ('VACATION', 'SICK', 'PERSONAL', 'BEREAVEMENT',
+                           'MATERNITY', 'PATERNITY', 'JURY_DUTY', 'UNPAID', 'OTHER')),
+    accrual_frequency VARCHAR(20) NOT NULL DEFAULT 'MONTHLY'
+        CHECK (accrual_frequency IN ('WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    accrual_rate NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (accrual_rate >= 0),
+    annual_entitlement NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (annual_entitlement >= 0),
+    max_carryover NUMERIC(5,2) DEFAULT 0.00
+        CHECK (max_carryover >= 0),
+    is_paid BOOLEAN NOT NULL DEFAULT TRUE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB DEFAULT '{}'::JSONB
+);
+
+-- Indexes for time_off_types
+CREATE INDEX IF NOT EXISTS idx_time_off_types_code ON hr.time_off_types(time_off_type_code);
+CREATE INDEX IF NOT EXISTS idx_time_off_types_category ON hr.time_off_types(category);
+CREATE INDEX IF NOT EXISTS idx_time_off_types_active ON hr.time_off_types(is_active) WHERE is_active = TRUE;
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS trg_time_off_types_updated_at ON hr.time_off_types;
+CREATE TRIGGER trg_time_off_types_updated_at
+    BEFORE UPDATE ON hr.time_off_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE hr.time_off_types IS 'Master table for time-off type definitions and accrual rules.';
+
+-- =============================================================================
+-- Serial No: 101 | TABLE: hr.time_off_types
+-- Description: Master table for time-off type definitions and accrual rules
+-- Business Case: This table serves as the central repository for all time-off types
+--   within the organization, enabling accurate accrual calculations, balance
+--   tracking, and compliance with labor regulations. Time-off types are critical
+--   for managing employee entitlements, tracking usage patterns, and supporting
+--   workforce planning.
+-- KPI: Time-off type coverage rate, Accrual calculation accuracy,
+--      Balance tracking correctness, Policy compliance rate
+-- Feature Reference: F-TO-001, F-TO-002, F-HR-003
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hr.time_off_types (
+    time_off_type_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    time_off_type_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (time_off_type_code ~ '^[A-Z0-9_-]{3,50}$'),
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    category VARCHAR(50) NOT NULL
+        CHECK (category IN ('VACATION', 'SICK', 'PERSONAL', 'BEREAVEMENT',
+                           'MATERNITY', 'PATERNITY', 'JURY_DUTY', 'UNPAID', 'OTHER')),
+    accrual_frequency VARCHAR(20) NOT NULL DEFAULT 'MONTHLY'
+        CHECK (accrual_frequency IN ('WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    accrual_rate NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (accrual_rate >= 0),
+    annual_entitlement NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (annual_entitlement >= 0),
+    max_carryover NUMERIC(5,2) DEFAULT 0.00
+        CHECK (max_carryover >= 0),
+    max_balance NUMERIC(5,2)
+        CHECK (max_balance IS NULL OR max_balance >= 0),
+    min_balance NUMERIC(5,2) DEFAULT 0.00
+        CHECK (min_balance >= 0),
+    is_paid BOOLEAN NOT NULL DEFAULT TRUE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    requires_approval BOOLEAN NOT NULL DEFAULT TRUE,
+    requires_documentation BOOLEAN NOT NULL DEFAULT FALSE,
+    advance_notice_days INTEGER DEFAULT 0
+        CHECK (advance_notice_days >= 0),
+    min_request_hours NUMERIC(5,2) DEFAULT 1.00
+        CHECK (min_request_hours > 0),
+    max_request_hours NUMERIC(5,2)
+        CHECK (max_request_hours IS NULL OR max_request_hours > 0),
+    expiry_months INTEGER
+        CHECK (expiry_months IS NULL OR expiry_months > 0),
+    effective_start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    effective_end_date DATE,
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB DEFAULT '{}'::JSONB,
+    CONSTRAINT chk_time_off_type_dates CHECK (
+        effective_end_date IS NULL OR effective_end_date >= effective_start_date
+    )
+);
+
+-- Indexes for time_off_types
+CREATE INDEX IF NOT EXISTS idx_time_off_types_code ON hr.time_off_types(time_off_type_code);
+CREATE INDEX IF NOT EXISTS idx_time_off_types_category ON hr.time_off_types(category);
+CREATE INDEX IF NOT EXISTS idx_time_off_types_active ON hr.time_off_types(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_time_off_types_paid ON hr.time_off_types(is_paid);
+CREATE INDEX IF NOT EXISTS idx_time_off_types_metadata ON hr.time_off_types USING GIN(metadata);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS trg_time_off_types_updated_at ON hr.time_off_types;
+CREATE TRIGGER trg_time_off_types_updated_at
+    BEFORE UPDATE ON hr.time_off_types
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE hr.time_off_types IS 'Master table for time-off type definitions and accrual rules.
+Enables accurate accrual calculations, balance tracking, and compliance with labor regulations.
+Supports complex accrual rules, carryover policies, and multi-year balance tracking.';
+
+-- =============================================================================
+-- Serial No: 102 | TABLE: hr.time_off_balances
+-- Description: Employee time-off balance tracking with accrual history
+-- Business Case: This table maintains real-time time-off balances for each employee
+--   and time-off type combination, enabling accurate tracking of accrued, used,
+--   and available time-off hours. It supports complex accrual calculations,
+--   carryover policies, and expiry tracking.
+-- KPI: Balance accuracy rate (>99%), Accrual calculation correctness (>99.9%),
+--      Real-time data availability (>99.9%)
+-- Feature Reference: F-TO-003, F-TO-004, F-PAY-005
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hr.time_off_balances (
+    balance_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    employee_id UUID NOT NULL REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+    time_off_type_id UUID NOT NULL REFERENCES hr.time_off_types(time_off_type_id),
+    balance_year INTEGER NOT NULL
+        CHECK (balance_year >= 2000),
+    
+    -- Balance components
+    opening_balance NUMERIC(5,2) NOT NULL DEFAULT 0.00,
+    current_balance NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (current_balance >= 0),
+    accrued_year_to_date NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (accrued_year_to_date >= 0),
+    used_year_to_date NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (used_year_to_date >= 0),
+    carryover_from_previous NUMERIC(5,2) DEFAULT 0.00
+        CHECK (carryover_from_previous >= 0),
+    expired_hours NUMERIC(5,2) DEFAULT 0.00
+        CHECK (expired_hours >= 0),
+    adjusted_hours NUMERIC(5,2) DEFAULT 0.00,
+    
+    -- Accrual tracking
+    accrual_rate NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (accrual_rate >= 0),
+    last_accrual_date DATE,
+    next_accrual_date DATE,
+    last_accrual_amount NUMERIC(5,2) DEFAULT 0.00,
+    
+    -- Entitlement tracking
+    annual_entitlement NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (annual_entitlement >= 0),
+    remaining_entitlement NUMERIC(5,2)
+        CHECK (remaining_entitlement IS NULL OR remaining_entitlement >= 0),
+    
+    -- Expiry tracking
+    expiry_date DATE,
+    
+    -- Status
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    lock_reason TEXT,
+    
+    -- Audit
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB DEFAULT '{}'::JSONB,
+    
+    -- Constraints
+    CONSTRAINT uq_employee_type_year UNIQUE(employee_id, time_off_type_id, balance_year),
+    CONSTRAINT chk_balance_consistency CHECK (
+        current_balance = opening_balance + accrued_year_to_date - used_year_to_date 
+                        + carryover_from_previous - expired_hours + adjusted_hours
+    )
+);
+
+-- Indexes for time_off_balances
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_employee ON hr.time_off_balances(employee_id);
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_type ON hr.time_off_balances(time_off_type_id);
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_year ON hr.time_off_balances(balance_year);
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_active ON hr.time_off_balances(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_expiry ON hr.time_off_balances(expiry_date) WHERE expiry_date IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_balance ON hr.time_off_balances(current_balance);
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_metadata ON hr.time_off_balances USING GIN(metadata);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS trg_time_off_balances_updated_at ON hr.time_off_balances;
+CREATE TRIGGER trg_time_off_balances_updated_at
+    BEFORE UPDATE ON hr.time_off_balances
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE hr.time_off_balances IS 'Employee time-off balance tracking with accrual history.
+Maintains real-time time-off balances for each employee and time-off type combination.
+Supports complex accrual calculations, carryover policies, and expiry tracking.';
+
+-- Verify tables exist
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name IN ('time_off_types', 'time_off_balances')
+AND table_schema = 'hr';
+
+-- Verify columns
+SELECT table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'hr'
+AND table_name IN ('time_off_types', 'time_off_balances')
+ORDER BY table_name, ordinal_position;
+
+-- Verify constraints
+SELECT tc.table_name, tc.constraint_name, tc.constraint_type
+FROM information_schema.table_constraints tc
+WHERE tc.table_schema = 'hr'
+AND tc.table_name IN ('time_off_types', 'time_off_balances');
+
+-- Verify foreign keys
+SELECT
+    tc.table_name,
+    kcu.column_name,
+    ccu.table_name AS foreign_table_name,
+    ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+    ON tc.constraint_name = kcu.constraint_name
+JOIN information_schema.constraint_column_usage AS ccu
+    ON ccu.constraint_name = tc.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY'
+AND tc.table_schema = 'hr'
+AND tc.table_name IN ('time_off_types', 'time_off_balances');
+
+
+
+-- =============================================================================
+-- Serial No: ALT-102 | ALTER TABLE: hr.time_off_balances
+-- Purpose: Add missing days_until_expiry column for expiry tracking
+-- Business Case: This column provides automatic calculation of days remaining 
+--                until time-off balance expires, enabling proactive notifications
+--                to employees and managers about upcoming expirations. This helps
+--                reduce lost time-off hours and improves employee satisfaction.
+-- KPI: Expiry notification rate, Time-off utilization rate, Employee satisfaction
+-- Feature Reference: F-TO-003, F-TO-004, F-COMM-005
+-- =============================================================================
+
+-- Step 1: Add the column (initially nullable to avoid locking issues)
+ALTER TABLE hr.time_off_balances
+ADD COLUMN IF NOT EXISTS days_until_expiry INTEGER;
+
+
+
+-- =============================================================================
+-- Serial No: 103 | VIEW: hr.v_employee_time_off_balance
+-- =============================================================================
+-- Purpose: Real-time time-off balance tracking with accrual projections and recommendations
+-- Business Case: Provides transparent, accurate time-off balance tracking for employees and managers,
+--                enabling informed decision-making about time-off requests and workforce planning.
+--                Supports complex accrual rules, carryover policies, and multi-year balance tracking.
+--                Reduces administrative overhead for HR departments and improves employee satisfaction
+--                through clear visibility into time-off entitlements and usage patterns.
+-- KPI: 1. Balance accuracy rate (>99%), 2. Accrual calculation correctness (>99.9%),
+--      3. Real-time data availability (>99.9%), 4. User adoption rate (>85%),
+--      5. Query performance (<2 seconds), 6. Employee satisfaction with time-off tracking (>4/5),
+--      7. Reduction in time-off disputes (>90%)
+-- Feature Reference: F-TO-005, F-TO-006, F-HR-007, F-REP-008, F-SELF-009
+-- Dependencies: hr.time_off_balances, hr.time_off_types, hr.employees, hr.departments,
+--               operations.locations, hr.positions, hr.time_off_requests
+-- =============================================================================
+
+CREATE OR REPLACE VIEW hr.v_employee_time_off_balance AS
+WITH accrual_calculations AS (
+    SELECT
+        tob.balance_id,
+        tob.employee_id,
+        tob.time_off_type_id,
+        tot.name AS time_off_type_name,
+        tot.time_off_type_code,
+        tot.category,
+        tot.accrual_frequency,
+        tot.max_carryover,
+        tot.is_paid,
+        tot.annual_entitlement AS type_annual_entitlement,
+        
+        -- Current balances
+        tob.current_balance,
+        tob.accrued_year_to_date,
+        tob.used_year_to_date,
+        tob.carryover_from_previous,
+        tob.opening_balance,
+        tob.expired_hours,
+        tob.adjusted_hours,
+        
+        -- Accrual rates and dates
+        tob.accrual_rate,
+        tob.last_accrual_date,
+        tob.next_accrual_date,
+        tob.last_accrual_amount,
+        
+        -- Calculations
+        CASE
+            WHEN tob.last_accrual_date IS NOT NULL
+            THEN CURRENT_DATE - tob.last_accrual_date
+            ELSE NULL
+        END AS days_since_last_accrual,
+        
+        CASE
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'MONTHLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 30.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'WEEKLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 7.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'BIWEEKLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 14.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'DAILY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date)
+            ELSE 0
+        END AS accrued_since_last,
+        
+        tob.current_balance + 
+        CASE
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'MONTHLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 30.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'WEEKLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 7.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'BIWEEKLY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date) / 14.0
+            WHEN tob.last_accrual_date IS NOT NULL AND tot.accrual_frequency = 'DAILY'
+            THEN tob.accrual_rate * (CURRENT_DATE - tob.last_accrual_date)
+            ELSE 0
+        END AS projected_balance,
+        
+        -- Annual entitlements
+        tob.annual_entitlement,
+        tob.remaining_entitlement,
+        
+        -- Usage metrics
+        CASE
+            WHEN tob.annual_entitlement > 0
+            THEN (tob.used_year_to_date / tob.annual_entitlement) * 100
+            ELSE 0
+        END AS utilization_percentage,
+        
+        CASE
+            WHEN tob.annual_entitlement > 0
+            THEN (tob.current_balance / tob.annual_entitlement) * 100
+            ELSE 0
+        END AS balance_percentage,
+        
+        -- Risk assessment
+        CASE
+            WHEN tob.current_balance < 1.0 THEN 'LOW_BALANCE'
+            WHEN tob.current_balance < 5.0 THEN 'WARNING'
+            WHEN tob.current_balance > (tob.annual_entitlement * 0.8) AND tob.annual_entitlement > 0 THEN 'HIGH_BALANCE'
+            ELSE 'HEALTHY'
+        END AS balance_status,
+        
+        -- Recommendations
+        CASE
+            WHEN tob.current_balance < 1.0 THEN 'Use remaining time off soon'
+            WHEN tob.current_balance < 5.0 THEN 'Plan time off to avoid losing hours'
+            WHEN tob.current_balance > (tob.annual_entitlement * 0.8) AND tob.annual_entitlement > 0 
+                THEN 'Consider using time off to avoid max accrual limits'
+            ELSE 'Good balance maintained'
+        END AS recommendation,
+        
+        -- Expiry tracking
+        tob.expiry_date,
+        tob.days_until_expiry,
+        
+        -- Compliance flags
+        CASE
+            WHEN tob.current_balance > tot.max_carryover AND tot.max_carryover > 0 
+                THEN 'EXCEEDS_MAX_CARRYOVER'
+            WHEN tob.expiry_date IS NOT NULL AND tob.expiry_date < CURRENT_DATE + INTERVAL '30 days' 
+                THEN 'NEAR_EXPIRY'
+            WHEN tob.annual_entitlement > 0 AND (tob.used_year_to_date / tob.annual_entitlement) > 0.8 
+                THEN 'HIGH_UTILIZATION'
+            ELSE 'COMPLIANT'
+        END AS compliance_status,
+        
+        -- Balance year and status
+        tob.balance_year,
+        tob.is_active,
+        tob.is_locked,
+        tob.lock_reason
+        
+    FROM hr.time_off_balances tob
+    JOIN hr.time_off_types tot ON tob.time_off_type_id = tot.time_off_type_id
+    WHERE tob.is_active = TRUE
+    AND tot.is_active = TRUE
+    AND tob.balance_year = EXTRACT(YEAR FROM CURRENT_DATE)
+),
+pending_requests AS (
+    SELECT
+        tor.employee_id,
+        tor.request_type,
+        SUM(tor.hours_requested) AS pending_hours,
+        COUNT(*) AS pending_request_count
+    FROM hr.time_off_requests tor
+    WHERE tor.status = 'PENDING'
+    AND tor.start_date >= CURRENT_DATE
+    GROUP BY tor.employee_id, tor.request_type
+),
+scheduled_time_off AS (
+    SELECT
+        tor.employee_id,
+        tor.request_type,
+        SUM(tor.hours_requested) AS scheduled_hours,
+        COUNT(*) AS scheduled_request_count
+    FROM hr.time_off_requests tor
+    WHERE tor.status IN ('APPROVED', 'PARTIALLY_APPROVED')
+    AND tor.start_date > CURRENT_DATE
+    GROUP BY tor.employee_id, tor.request_type
+),
+previous_year_usage AS (
+    SELECT
+        tor.employee_id,
+        tor.request_type,
+        SUM(tor.hours_requested) AS previous_year_hours,
+        COUNT(*) AS previous_year_request_count
+    FROM hr.time_off_requests tor
+    WHERE tor.status IN ('APPROVED', 'PARTIALLY_APPROVED')
+    AND EXTRACT(YEAR FROM tor.start_date) = EXTRACT(YEAR FROM CURRENT_DATE) - 1
+    GROUP BY tor.employee_id, tor.request_type
+)
+SELECT
+    -- Employee information
+    e.employee_id,
+    e.employee_code,
+    e.first_name,
+    e.last_name,
+    e.preferred_name,
+    e.email,
+    e.hire_date,
+    EXTRACT(YEAR FROM AGE(CURRENT_DATE, e.hire_date)) AS years_of_service,
+    e.employment_status,
+    e.employment_type,
+    
+    -- Organizational context
+    e.department_id,
+    d.department_name,
+    d.department_code,
+    e.location_id,
+    loc.location_name,
+    loc.location_code,
+    e.position_id,
+    p.position_title,
+    p.position_code,
+    
+    -- Time off type
+    ac.balance_id,
+    ac.time_off_type_id,
+    ac.time_off_type_name,
+    ac.time_off_type_code,
+    ac.category,
+    ac.accrual_frequency,
+    ac.max_carryover,
+    ac.is_paid,
+    ac.type_annual_entitlement,
+    
+    -- Balance information
+    ac.current_balance,
+    ac.accrued_year_to_date,
+    ac.used_year_to_date,
+    ac.carryover_from_previous,
+    ac.opening_balance,
+    ac.expired_hours,
+    ac.adjusted_hours,
+    
+    -- Projections
+    ac.projected_balance,
+    ac.annual_entitlement,
+    ac.remaining_entitlement,
+    
+    -- Pending and scheduled
+    COALESCE(pr.pending_hours, 0) AS pending_hours,
+    COALESCE(pr.pending_request_count, 0) AS pending_request_count,
+    COALESCE(st.scheduled_hours, 0) AS scheduled_hours,
+    COALESCE(st.scheduled_request_count, 0) AS scheduled_request_count,
+    
+    -- Available balance calculations
+    ac.current_balance - COALESCE(pr.pending_hours, 0) AS available_balance,
+    ac.projected_balance - COALESCE(pr.pending_hours, 0) AS projected_available_balance,
+    
+    -- Usage metrics
+    ROUND(ac.utilization_percentage, 2) AS utilization_percentage,
+    ROUND(ac.balance_percentage, 2) AS balance_percentage,
+    
+    -- Risk indicators
+    ac.balance_status,
+    ac.recommendation,
+    ac.compliance_status,
+    
+    -- Accrual details
+    ac.accrual_rate,
+    ac.last_accrual_date,
+    ac.next_accrual_date,
+    ac.days_since_last_accrual,
+    ROUND(ac.accrued_since_last, 2) AS accrued_since_last,
+    ac.last_accrual_amount,
+    
+    -- Expiry information
+    ac.expiry_date,
+    ac.days_until_expiry,
+    
+    -- Historical context
+    COALESCE(pyu.previous_year_hours, 0) AS previous_year_usage,
+    COALESCE(pyu.previous_year_request_count, 0) AS previous_year_request_count,
+    
+    -- Planning insights
+    CASE
+        WHEN ac.current_balance > (ac.annual_entitlement * 0.75) AND ac.annual_entitlement > 0 THEN 'ENCOURAGE_USAGE'
+        WHEN ac.current_balance < (ac.annual_entitlement * 0.25) AND ac.annual_entitlement > 0 THEN 'LIMIT_USAGE'
+        ELSE 'NORMAL'
+    END AS planning_guidance,
+    
+    -- Lock status
+    ac.is_locked,
+    ac.lock_reason,
+    
+    -- Metadata
+    ac.balance_year,
+    ac.is_active,
+    CURRENT_TIMESTAMP AS calculated_at
+    
+FROM accrual_calculations ac
+JOIN hr.employees e ON ac.employee_id = e.employee_id
+LEFT JOIN hr.departments d ON e.department_id = d.department_id
+LEFT JOIN operations.locations loc ON e.location_id = loc.location_id
+LEFT JOIN hr.positions p ON e.position_id = p.position_id
+LEFT JOIN pending_requests pr ON ac.employee_id = pr.employee_id 
+    AND ac.time_off_type_code = pr.request_type
+LEFT JOIN scheduled_time_off st ON ac.employee_id = st.employee_id 
+    AND ac.time_off_type_code = st.request_type
+LEFT JOIN previous_year_usage pyu ON ac.employee_id = pyu.employee_id 
+    AND ac.time_off_type_code = pyu.request_type
+WHERE e.employment_status IN ('ACTIVE', 'PROBATION', 'ON_LEAVE')
+AND e.termination_date IS NULL
+ORDER BY e.last_name, e.first_name, ac.time_off_type_name;
+
+-- =============================================================================
+-- VIEW COMMENTS AND DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON VIEW hr.v_employee_time_off_balance IS 'Comprehensive time-off balance tracking with accrual projections, 
+risk assessment, compliance checks, and planning recommendations. Provides real-time visibility into employee time-off 
+entitlements, usage patterns, and available balances. Supports complex accrual rules, carryover policies, and multi-year 
+balance tracking. Enables informed decision-making for employees and managers regarding time-off requests and workforce 
+planning. Reduces administrative overhead for HR departments and improves employee satisfaction through transparent 
+entitlement tracking.
+
+KEY FEATURES:
+- Real-time balance calculations with accrual projections
+- Pending and scheduled time-off tracking
+- Risk assessment and balance status indicators
+- Compliance monitoring for carryover limits and expiry dates
+- Planning guidance and recommendations
+- Historical usage comparison
+- Multi-year balance tracking
+
+KPI TARGETS:
+- Balance accuracy rate: >99%
+- Accrual calculation correctness: >99.9%
+- Real-time data availability: >99.9%
+- Query performance: <2 seconds
+- Employee satisfaction: >4/5
+
+DEPENDENCIES: hr.time_off_balances, hr.time_off_types, hr.employees, hr.departments, 
+              operations.locations, hr.positions, hr.time_off_requests';
+
+-- Column comments for key fields
+COMMENT ON COLUMN hr.v_employee_time_off_balance.employee_id IS 'Unique identifier for the employee';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.employee_code IS 'Business-readable employee code';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.current_balance IS 'Current available time-off balance in hours';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.projected_balance IS 'Projected balance including accrued time since last accrual';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.available_balance IS 'Current balance minus pending requests';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.utilization_percentage IS 'Percentage of annual entitlement already used';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.balance_status IS 'Risk indicator: LOW_BALANCE, WARNING, HIGH_BALANCE, or HEALTHY';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.recommendation IS 'Actionable recommendation for the employee';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.compliance_status IS 'Compliance flag: EXCEEDS_MAX_CARRYOVER, NEAR_EXPIRY, HIGH_UTILIZATION, or COMPLIANT';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.accrual_frequency IS 'How often time-off accrues: WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY, ANNUAL';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.days_until_expiry IS 'Days remaining before balance expires (NULL if no expiry)';
+COMMENT ON COLUMN hr.v_employee_time_off_balance.planning_guidance IS 'Management guidance: ENCOURAGE_USAGE, LIMIT_USAGE, or NORMAL';
+
+-- =============================================================================
+-- INDEXES FOR UNDERLYING TABLES (Performance Optimization)
+-- =============================================================================
+
+-- Ensure indexes exist on time_off_balances
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_employee_year 
+ON hr.time_off_balances(employee_id, balance_year) 
+WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_type_year 
+ON hr.time_off_balances(time_off_type_id, balance_year) 
+WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_time_off_balances_expiry 
+ON hr.time_off_balances(expiry_date) 
+WHERE expiry_date IS NOT NULL AND is_active = TRUE;
+
+-- Ensure indexes exist on time_off_requests
+CREATE INDEX IF NOT EXISTS idx_time_off_requests_employee_status 
+ON hr.time_off_requests(employee_id, status) 
+WHERE status IN ('PENDING', 'APPROVED', 'PARTIALLY_APPROVED');
+
+CREATE INDEX IF NOT EXISTS idx_time_off_requests_dates 
+ON hr.time_off_requests(start_date, end_date);
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- Grant SELECT to appropriate roles based on schema security model
+GRANT SELECT ON hr.v_employee_time_off_balance TO reporting_role;
+GRANT SELECT ON hr.v_employee_time_off_balance TO manager_role;
+GRANT SELECT ON hr.v_employee_time_off_balance TO hr_role;
+GRANT SELECT ON hr.v_employee_time_off_balance TO admin_role;
+GRANT SELECT ON hr.v_employee_time_off_balance TO finance_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Test the view with sample data
+SELECT 
+    employee_code,
+    first_name,
+    last_name,
+    time_off_type_name,
+    current_balance,
+    projected_balance,
+    available_balance,
+    balance_status,
+    recommendation,
+    compliance_status
+FROM hr.v_employee_time_off_balance
+WHERE employment_status = 'ACTIVE'
+ORDER BY last_name, first_name
+LIMIT 10;
+
+-- Check view dependencies
+SELECT 
+    dependent_ns.nspname AS dependent_schema,
+    dependent_view.relname AS dependent_view,
+    source_ns.nspname AS source_schema,
+    source_table.relname AS source_table
+FROM pg_depend
+JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid
+JOIN pg_class AS dependent_view ON pg_rewrite.ev_class = dependent_view.oid
+JOIN pg_class AS source_table ON pg_depend.refobjid = source_table.oid
+JOIN pg_namespace AS dependent_ns ON dependent_ns.oid = dependent_view.relnamespace
+JOIN pg_namespace AS source_ns ON source_ns.oid = source_table.relnamespace
+WHERE source_table.relname IN ('time_off_balances', 'time_off_types', 'employees', 'time_off_requests')
+ORDER BY source_table.relname;
+
+-- Verify view exists
+SELECT table_name, table_schema 
+FROM information_schema.views 
+WHERE table_name = 'v_employee_time_off_balance' 
+AND table_schema = 'hr';
+
+-- =============================================================================
+-- REFRESH FUNCTION (For Materialized View Alternative)
+-- =============================================================================
+-- If you need this as a materialized view for performance, use this function:
+
+-- CREATE MATERIALIZED VIEW IF NOT EXISTS hr.mv_employee_time_off_balance AS
+-- [Same SELECT statement as above];
+
+-- CREATE OR REPLACE FUNCTION hr.refresh_mv_employee_time_off_balance()
+-- RETURNS TABLE (
+--     refresh_status VARCHAR(20),
+--     refresh_duration_ms INTEGER,
+--     rows_affected INTEGER,
+--     error_message TEXT
+-- ) AS $$
+-- DECLARE
+--     v_start_time TIMESTAMPTZ := CURRENT_TIMESTAMP;
+--     v_end_time TIMESTAMPTZ;
+--     v_row_count INTEGER;
+--     v_error_message TEXT;
+--     v_status VARCHAR(20) := 'SUCCESS';
+-- BEGIN
+--     BEGIN
+--         REFRESH MATERIALIZED VIEW CONCURRENTLY hr.mv_employee_time_off_balance;
+--         SELECT COUNT(*) INTO v_row_count FROM hr.mv_employee_time_off_balance;
+--         v_end_time := CURRENT_TIMESTAMP;
+--         
+--         INSERT INTO system.mv_refresh_history (
+--             materialized_view, refresh_time, duration_ms, rows_affected, status
+--         ) VALUES (
+--             'hr.mv_employee_time_off_balance', CURRENT_TIMESTAMP,
+--             EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000,
+--             v_row_count, 'SUCCESS'
+--         );
+--         
+--         RETURN QUERY SELECT v_status, 
+--             EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000::INTEGER,
+--             v_row_count, NULL::TEXT;
+--     EXCEPTION WHEN OTHERS THEN
+--         GET STACKED DIAGNOSTICS v_error_message = MESSAGE_TEXT;
+--         v_status := 'FAILED';
+--         v_end_time := CURRENT_TIMESTAMP;
+--         
+--         INSERT INTO system.mv_refresh_history (
+--             materialized_view, refresh_time, duration_ms, error_message, status
+--         ) VALUES (
+--             'hr.mv_employee_time_off_balance', CURRENT_TIMESTAMP,
+--             EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000,
+--             v_error_message, 'FAILED'
+--         );
+--         
+--         RETURN QUERY SELECT v_status,
+--             EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000::INTEGER,
+--             0, v_error_message;
+--     END;
+-- END;
+-- $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- GRANT EXECUTE ON FUNCTION hr.refresh_mv_employee_time_off_balance TO admin_role;
+-- GRANT EXECUTE ON FUNCTION hr.refresh_mv_employee_time_off_balance TO scheduler_role;
+
+
+
+
+-- =============================================================================
+-- Serial No: 84 | TABLE: scheduling.shift_swap_requests
+-- =============================================================================
+-- Description: Employee-initiated shift exchange requests with workflow management
+-- Business Case: The shift_swap_requests table manages the complete lifecycle of 
+--                employee-initiated shift exchange requests, providing a structured 
+--                workflow for schedule adjustments. It captures all details of swap 
+--                requests including the initiating employee, proposed swap partner, 
+--                shift details, and current status in the approval workflow. This 
+--                functionality improves employee satisfaction by providing flexibility 
+--                in schedule management while maintaining proper oversight through 
+--                manager approval. The table supports complex swap scenarios including 
+--                multi-party swaps and conditional swaps. It includes comprehensive 
+--                tracking of swap history for audit and analysis purposes. The design 
+--                accommodates organizational policies around shift swapping through 
+--                configurable rules and constraints. The table also tracks the business 
+--                impact of swaps, such as changes in coverage levels or compliance 
+--                status, to support informed approval decisions. Historical swap data 
+--                is used to identify patterns and improve the scheduling algorithm's 
+--                ability to predict swap likelihood. For compliance purposes, the 
+--                system maintains detailed audit trails of all swap activities. By 
+--                centralizing swap management, the organization can ensure consistent 
+--                application of swap policies while providing employees with the 
+--                flexibility they need. The table is optimized for rapid processing 
+--                of swap requests during peak periods when many employees may be 
+--                seeking schedule adjustments.
+-- KPI: Swap request completion rate, Average swap approval time,
+--      Employee satisfaction with swap process, Swap-related coverage gaps,
+--      Policy compliance rate for swaps
+-- Feature Reference: 436, 437, 438, 439, 440
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.shift_swap_requests (
+    -- Primary identifiers
+    swap_request_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    swap_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (swap_code ~ '^[A-Z0-9_-]{5,50}$'),
+    
+    -- Core relationships
+    requesting_employee_id UUID NOT NULL 
+        REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+    proposed_with_employee_id UUID 
+        REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    requested_shift_id UUID NOT NULL 
+        REFERENCES scheduling.shifts(shift_id) ON DELETE CASCADE,
+    offering_shift_id UUID NOT NULL 
+        REFERENCES scheduling.shifts(shift_id) ON DELETE CASCADE,
+    
+    -- Status and workflow
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED', 'COMPLETED', 'CONDITIONAL')),
+    reason TEXT NOT NULL,
+    manager_notes TEXT,
+    
+    -- Timestamps
+    requested_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    rejected_at TIMESTAMP WITH TIME ZONE,
+    rejected_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Automation and compliance
+    is_automated BOOLEAN NOT NULL DEFAULT FALSE,
+    business_impact JSONB,
+    compliance_status VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN'
+        CHECK (compliance_status IN ('COMPLIANT', 'WARNING', 'VIOLATION', 'UNKNOWN')),
+    compliance_details TEXT,
+    swap_conditions JSONB,
+    
+    -- Versioning
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Constraints
+    CONSTRAINT chk_swap_request_employees 
+        CHECK (requesting_employee_id != COALESCE(proposed_with_employee_id, requesting_employee_id)),
+    CONSTRAINT chk_swap_request_dates 
+        CHECK (
+            (approved_at IS NULL AND rejected_at IS NULL) OR
+            (approved_at IS NOT NULL AND rejected_at IS NULL) OR
+            (approved_at IS NULL AND rejected_at IS NOT NULL)
+        ),
+    CONSTRAINT chk_swap_request_completion 
+        CHECK (
+            (status = 'COMPLETED' AND completed_at IS NOT NULL) OR
+            (status != 'COMPLETED' AND completed_at IS NULL)
+        )
+);
+
+-- Add missing swap_code column to scheduling.shift_swap_requests
+ALTER TABLE scheduling.shift_swap_requests
+ADD COLUMN IF NOT EXISTS swap_code VARCHAR(50) UNIQUE;
+
+-- Add check constraint for swap_code format (matches schema standards)
+ALTER TABLE scheduling.shift_swap_requests
+ADD CONSTRAINT chk_swap_code_format 
+CHECK (swap_code ~ '^[A-Z0-9_-]{5,50}$' OR swap_code IS NULL);
+
+-- Add index for performance
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_swap_code 
+ON scheduling.shift_swap_requests(swap_code) 
+WHERE swap_code IS NOT NULL;
+
+-- Add column comment for documentation
+COMMENT ON COLUMN scheduling.shift_swap_requests.swap_code IS 
+'Business-readable swap request code (format: SWP-EMP-YYYYMMDD-###)';
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE
+-- =============================================================================
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_requesting 
+    ON scheduling.shift_swap_requests(requesting_employee_id);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_proposed 
+    ON scheduling.shift_swap_requests(proposed_with_employee_id) 
+    WHERE proposed_with_employee_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_requested_shift 
+    ON scheduling.shift_swap_requests(requested_shift_id);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_offering_shift 
+    ON scheduling.shift_swap_requests(offering_shift_id);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_status 
+    ON scheduling.shift_swap_requests(status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_requested_at 
+    ON scheduling.shift_swap_requests(requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_compliance 
+    ON scheduling.shift_swap_requests(compliance_status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_conditions 
+    ON scheduling.shift_swap_requests USING GIN(swap_conditions);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_business_impact 
+    ON scheduling.shift_swap_requests USING GIN(business_impact);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_automated 
+    ON scheduling.shift_swap_requests(is_automated) WHERE is_automated = TRUE;
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_employee_status 
+    ON scheduling.shift_swap_requests(requesting_employee_id, status, requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_pending_expiry 
+    ON scheduling.shift_swap_requests(status, requested_at) 
+    WHERE status = 'PENDING';
+
+-- =============================================================================
+-- TRIGGERS FOR AUDIT COLUMNS
+-- =============================================================================
+
+DROP TRIGGER IF EXISTS trg_shift_swap_requests_updated_at 
+    ON scheduling.shift_swap_requests;
+
+CREATE TRIGGER trg_shift_swap_requests_updated_at
+    BEFORE UPDATE ON scheduling.shift_swap_requests
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- =============================================================================
+-- COLUMN COMMENTS
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.shift_swap_requests IS 
+'Employee-initiated shift exchange requests with workflow management.
+Manages complete lifecycle of employee-initiated shift exchange requests. Captures all details of swap requests including
+initiating employee, proposed swap partner, and shift details. Improves employee satisfaction by providing schedule flexibility
+with proper oversight. Supports complex swap scenarios including multi-party and conditional swaps. Includes comprehensive
+tracking for audit and analysis. Accommodates organizational policies through configurable rules. Tracks business impact for
+informed approval decisions. Historical data used to identify patterns and improve scheduling algorithms. Maintains detailed
+audit trails for compliance. Centralizes swap management for consistent policy application. Optimized for rapid processing
+during peak periods.';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.swap_request_id IS 
+'Unique identifier for the swap request (UUID)';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.swap_code IS 
+'Business-readable swap request code (format: SWP-EMP-YYYYMMDD-###)';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.requesting_employee_id IS 
+'Employee who initiated the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.proposed_with_employee_id IS 
+'Employee proposed for the swap (NULL for open swap requests)';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.requested_shift_id IS 
+'Shift the requesting employee wants to give up';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.offering_shift_id IS 
+'Shift the requesting employee is offering in exchange';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.status IS 
+'Current status in the swap request workflow';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.reason IS 
+'Reason for the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.manager_notes IS 
+'Notes from manager during approval process';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.requested_at IS 
+'Timestamp when swap request was created';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.approved_at IS 
+'Timestamp when swap request was approved';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.approved_by IS 
+'Employee who approved the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.rejected_at IS 
+'Timestamp when swap request was rejected';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.rejected_by IS 
+'Employee who rejected the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.completed_at IS 
+'Timestamp when swap was completed';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.is_automated IS 
+'Indicates if swap was processed automatically by system';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.business_impact IS 
+'JSONB containing business impact assessment metrics';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.compliance_status IS 
+'Compliance status of the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.compliance_details IS 
+'Detailed compliance check results';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.swap_conditions IS 
+'JSONB containing conditional swap requirements';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.version IS 
+'Version number for swap request revisions';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.created_by IS 
+'User who created the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.created_at IS 
+'Timestamp when record was created';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.updated_by IS 
+'User who last updated the swap request';
+
+COMMENT ON COLUMN scheduling.shift_swap_requests.updated_at IS 
+'Timestamp when record was last updated';
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name = 'shift_swap_requests' 
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_name = 'shift_swap_requests'
+AND table_schema = 'scheduling'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'shift_swap_requests'
+AND schemaname = 'scheduling';
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_table = 'shift_swap_requests'
+AND event_object_schema = 'scheduling';
+
+-- Verify constraints
+SELECT conname, contype, condeferrable
+FROM pg_constraint
+WHERE conrelid = 'scheduling.shift_swap_requests'::regclass;
+
+
+-- =============================================================================--
+-- Serial No: 131 | TABLE: scheduling.schedule_optimization_runs
+-- =============================================================================--
+-- Description: Tracks automated schedule optimization algorithm executions and results
+-- Business Case: This table enables systematic evaluation and improvement of scheduling 
+--                algorithms by tracking individual optimization runs, parameters, and 
+--                outcomes. It supports A/B testing of different optimization strategies 
+--                and continuous improvement of scheduling quality. Provides detailed 
+--                data for algorithm performance analysis, resource utilization tracking, 
+--                and refinement. Unlike the parent optimization job table, this table 
+--                captures each execution attempt, allowing for analysis of convergence 
+--                patterns and failure modes.
+-- KPI: 1. Optimization success rate (>90%), 2. Algorithm execution time (<5 minutes),
+--      3. Schedule quality improvement (>15%), 4. Cost optimization effectiveness (>20%),
+--      5. Coverage improvement (>10%), 6. Algorithm comparison accuracy (>95%),
+--      7. User satisfaction with optimized schedules (>4/5)
+-- Feature Reference: 661, 662, 663, 664, 665
+-- =============================================================================--
+
+CREATE TABLE IF NOT EXISTS scheduling.schedule_optimization_runs (
+    -- Primary identifiers
+    optimization_run_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    optimization_run_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (optimization_run_code ~ '^OPT-RUN-[A-Z0-9]{6}-[0-9]{6}$'),
+    
+    -- Parent optimization job reference (links to schedule_optimization table)
+    optimization_request_id UUID NOT NULL,
+    
+    -- Schedule context
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    original_schedule_id UUID REFERENCES scheduling.schedules(schedule_id),
+    generated_schedule_id UUID REFERENCES scheduling.schedules(schedule_id),
+    
+    -- Algorithm configuration
+    algorithm_type VARCHAR(50) NOT NULL
+        CHECK (algorithm_type IN ('GENETIC', 'SIMULATED_ANNEALING', 'LINEAR_PROGRAMMING',
+                                 'CONSTRAINT_SATISFACTION', 'HEURISTIC', 'HYBRID', 'ML_BASED')),
+    algorithm_version VARCHAR(20) NOT NULL DEFAULT '1.0.0',
+    optimization_goals JSONB NOT NULL DEFAULT '{"coverage": 0.3, "cost": 0.3, "compliance": 0.2, "preferences": 0.2}'::jsonb,
+    constraint_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
+    algorithm_parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    
+    -- Execution environment
+    environment VARCHAR(20) NOT NULL DEFAULT 'PRODUCTION'
+        CHECK (environment IN ('DEVELOPMENT', 'TESTING', 'STAGING', 'PRODUCTION')),
+    server_hostname VARCHAR(100),
+    resource_group VARCHAR(50),
+    
+    -- Execution details
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    duration_ms INTEGER GENERATED ALWAYS AS (
+        CASE
+            WHEN completed_at IS NOT NULL AND started_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000
+            ELSE NULL
+        END
+    ) STORED,
+    status VARCHAR(20) NOT NULL DEFAULT 'RUNNING'
+        CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELED', 'TIMEOUT', 'PARTIAL_SUCCESS')),
+    error_message TEXT,
+    
+    -- Resource usage
+    memory_used_mb INTEGER CHECK (memory_used_mb >= 0),
+    cpu_time_seconds NUMERIC(10,2) CHECK (cpu_time_seconds >= 0),
+    iterations_completed INTEGER CHECK (iterations_completed >= 0),
+    peak_memory_mb INTEGER CHECK (peak_memory_mb >= 0),
+    
+    -- Results and metrics
+    initial_score NUMERIC(10,4) CHECK (initial_score >= 0),
+    final_score NUMERIC(10,4) CHECK (final_score >= 0),
+    improvement_percentage NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN initial_score > 0 THEN ((final_score - initial_score) / initial_score * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    optimization_metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+    constraint_violations JSONB DEFAULT '[]'::jsonb,
+    
+    -- Change tracking
+    changes_made INTEGER CHECK (changes_made >= 0),
+    accepted_changes INTEGER CHECK (accepted_changes >= 0),
+    rejection_rate NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN changes_made > 0 THEN ((changes_made - accepted_changes)::NUMERIC / changes_made * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    -- Constraints
+    CONSTRAINT chk_optimization_timing CHECK (completed_at IS NULL OR completed_at >= started_at),
+    CONSTRAINT chk_optimization_scores CHECK (
+        (final_score IS NULL AND initial_score IS NULL) OR
+        (final_score IS NOT NULL AND initial_score IS NOT NULL AND final_score >= 0 AND initial_score >= 0)
+    ),
+    CONSTRAINT chk_changes_consistency CHECK (accepted_changes IS NULL OR changes_made IS NULL OR accepted_changes <= changes_made),
+    CONSTRAINT chk_duration_positive CHECK (duration_ms IS NULL OR duration_ms >= 0)
+);
+
+-- =============================================================================--
+-- Indexes for Performance Optimization
+-- =============================================================================--
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_schedule
+ON scheduling.schedule_optimization_runs(schedule_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_request
+ON scheduling.schedule_optimization_runs(optimization_request_id);
+
+-- Algorithm and status indexes
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_algorithm
+ON scheduling.schedule_optimization_runs(algorithm_type, algorithm_version);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_status
+ON scheduling.schedule_optimization_runs(status, completed_at);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_status_active
+ON scheduling.schedule_optimization_runs(status) WHERE status = 'RUNNING';
+
+-- Performance metric indexes
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_score
+ON scheduling.schedule_optimization_runs(final_score DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_duration
+ON scheduling.schedule_optimization_runs(duration_ms DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_improvement
+ON scheduling.schedule_optimization_runs(improvement_percentage DESC NULLS LAST);
+
+-- Environment and resource indexes
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_environment
+ON scheduling.schedule_optimization_runs(environment, status);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_server
+ON scheduling.schedule_optimization_runs(server_hostname) WHERE server_hostname IS NOT NULL;
+
+-- JSONB indexes for flexible querying
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_goals
+ON scheduling.schedule_optimization_runs USING GIN(optimization_goals);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_metrics
+ON scheduling.schedule_optimization_runs USING GIN(optimization_metrics);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_violations
+ON scheduling.schedule_optimization_runs USING GIN(constraint_violations);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_metadata
+ON scheduling.schedule_optimization_runs USING GIN(metadata);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_algo_status_date
+ON scheduling.schedule_optimization_runs(algorithm_type, status, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_optimization_runs_schedule_status
+ON scheduling.schedule_optimization_runs(schedule_id, status, started_at DESC);
+
+-- =============================================================================--
+-- Triggers for Automation
+-- =============================================================================--
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_optimization_runs_updated_at ON scheduling.schedule_optimization_runs;
+CREATE TRIGGER trg_optimization_runs_updated_at
+BEFORE UPDATE ON scheduling.schedule_optimization_runs
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- =============================================================================--
+-- Documentation Comments
+-- =============================================================================--
+
+COMMENT ON TABLE scheduling.schedule_optimization_runs IS 'Tracks automated schedule optimization algorithm executions, parameters, and performance results. 
+Provides detailed execution history for each optimization attempt, enabling algorithm tuning and performance analysis. 
+Links to parent optimization requests and generated schedules for complete traceability.';
+
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.optimization_run_id IS 'Unique identifier for the optimization run (UUID)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.optimization_run_code IS 'Business-readable run code (format: OPT-RUN-XXXXXX-YYYYYY)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.optimization_request_id IS 'Reference to the parent optimization job/request';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.schedule_id IS 'Target schedule being optimized';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.original_schedule_id IS 'Original schedule before optimization (if modifying existing)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.generated_schedule_id IS 'New schedule created by optimization (if successful)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.algorithm_type IS 'Type of optimization algorithm used (e.g., Genetic, Linear Programming)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.algorithm_version IS 'Version of the algorithm implementation';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.optimization_goals IS 'JSONB weights for different optimization objectives (coverage, cost, etc.)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.constraint_weights IS 'JSONB weights for hard/soft constraints';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.algorithm_parameters IS 'JSONB configuration parameters specific to the algorithm';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.environment IS 'Deployment environment (Development, Testing, Production)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.server_hostname IS 'Server where optimization was executed';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.resource_group IS 'Resource group/queue used for execution';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.started_at IS 'Timestamp when optimization execution began';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.completed_at IS 'Timestamp when optimization execution finished';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.duration_ms IS 'Execution duration in milliseconds (calculated)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.status IS 'Current status of the optimization run';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.error_message IS 'Error details if status is FAILED';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.memory_used_mb IS 'Peak memory consumption during execution';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.cpu_time_seconds IS 'CPU time consumed during execution';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.iterations_completed IS 'Number of algorithm iterations completed';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.peak_memory_mb IS 'Peak memory usage in MB';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.initial_score IS 'Schedule quality score before optimization';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.final_score IS 'Schedule quality score after optimization';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.improvement_percentage IS 'Percentage improvement in score (calculated)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.optimization_metrics IS 'JSONB detailed performance metrics';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.constraint_violations IS 'JSONB list of constraint violations found';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.changes_made IS 'Total number of changes proposed by algorithm';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.accepted_changes IS 'Number of changes accepted/applied';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.rejection_rate IS 'Percentage of changes rejected (calculated)';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.created_by IS 'User or system that initiated the run';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.created_at IS 'Timestamp when record was created';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.updated_by IS 'User or system that last updated the record';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.updated_at IS 'Timestamp when record was last updated';
+COMMENT ON COLUMN scheduling.schedule_optimization_runs.metadata IS 'Flexible JSONB metadata for extensibility';
+
+---=====================================================================================
 
 -- Serial No: P-001 | PROCEDURE: scheduling.refresh_all_materialized_views
 -- Purpose: Comprehensive refresh of all materialized views in dependency order
@@ -34577,6 +35836,5 @@ $$;
 
 COMMENT ON PROCEDURE scheduling.refresh_all_materialized_views IS 
 'Comprehensive refresh of all materialized views in dependency order with error handling and logging';
-
 
 
