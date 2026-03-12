@@ -35701,6 +35701,13330 @@ COMMENT ON COLUMN scheduling.schedule_optimization_runs.updated_by IS 'User or s
 COMMENT ON COLUMN scheduling.schedule_optimization_runs.updated_at IS 'Timestamp when record was last updated';
 COMMENT ON COLUMN scheduling.schedule_optimization_runs.metadata IS 'Flexible JSONB metadata for extensibility';
 
+
+
+-- =============================================================================
+-- Serial No: 29 | TABLE: scheduling.schedule_conflicts
+-- =============================================================================
+-- Description: Detects and manages scheduling conflicts with resolution tracking
+-- Business Case: This table enables proactive identification and resolution of 
+--                scheduling conflicts before they impact operations. It supports 
+--                automated conflict detection, prioritization based on severity 
+--                and business impact, and structured resolution workflows. By 
+--                tracking conflict patterns and resolution effectiveness, the 
+--                organization can identify root causes and implement preventive 
+--                measures. This reduces manual conflict resolution effort, 
+--                improves schedule reliability, and provides analytics for 
+--                continuous process improvement. The table integrates with 
+--                compliance monitoring to ensure conflicts don't result in 
+--                labor law violations.
+-- KPI: 1. Conflict detection rate (>95%), 2. Average conflict resolution time (<4 hours),
+--      3. Automated resolution rate (>60%), 4. Conflict recurrence rate (<5%),
+--      5. Manager time saved on conflict resolution (>50%), 6. Employee satisfaction 
+--      with resolution (>4/5), 7. Business impact reduction from conflicts (>80%)
+-- Feature Reference: F-SCH-029, F-SCH-030, F-COMP-003, F-ANA-010, F-MGT-002
+-- Dependencies: scheduling.schedules, scheduling.shifts, hr.employees, 
+--               hr.departments, operations.locations, hr.positions
+-- =============================================================================
+
+-- Create conflict status enum if not exists (aligned with schema standards)
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_status_enum') THEN
+CREATE TYPE scheduling.conflict_status_enum AS ENUM (
+'OPEN',              -- Conflict detected, awaiting action
+'IN_PROGRESS',       -- Resolution work underway
+'RESOLVED',          -- Conflict successfully resolved
+'ESCALATED',         -- Escalated to higher authority
+'DEFERRED',          -- Resolution postponed
+'WAIVED',            -- Conflict accepted as exception
+'FALSE_POSITIVE',    -- Detected conflict was not valid
+'EXPIRED'            -- Conflict no longer relevant
+);
+RAISE NOTICE 'Created enum type: scheduling.conflict_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.conflict_status_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.conflict_status_enum IS
+'Defines the lifecycle status of scheduling conflicts.
+OPEN: Conflict detected, awaiting action; IN_PROGRESS: Resolution work underway;
+RESOLVED: Conflict successfully resolved; ESCALATED: Escalated to higher authority;
+DEFERRED: Resolution postponed; WAIVED: Conflict accepted as exception;
+FALSE_POSITIVE: Detected conflict was not valid; EXPIRED: Conflict no longer relevant.';
+
+-- Create conflict type enum if not exists
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_type_enum') THEN
+CREATE TYPE scheduling.conflict_type_enum AS ENUM (
+'DOUBLE_BOOKING',        -- Employee assigned to multiple shifts simultaneously
+'TIME_OVERLAP',          -- Shift times overlap without adequate rest
+'UNDERSTAFFING',         -- Insufficient employees for required coverage
+'OVERSTAFFING',          -- More employees than needed (cost concern)
+'SKILL_MISMATCH',        -- Employee lacks required skills/certifications
+'AVAILABILITY_VIOLATION',-- Shift conflicts with employee availability
+'REST_PERIOD_VIOLATION', -- Insufficient rest between shifts (labor law)
+'OVERTIME_VIOLATION',    -- Exceeds maximum overtime limits
+'LOCATION_CONFLICT',     -- Employee assigned to multiple locations
+'EQUIPMENT_CONFLICT',    -- Resource/equipment double-booked
+'BUDGET_VIOLATION',      -- Schedule exceeds labor budget
+'PREFERENCE_VIOLATION',  -- Conflicts with approved employee preferences
+'UNION_RULE_VIOLATION',  -- Violates collective bargaining agreement
+'COMPLIANCE_VIOLATION'   -- General labor law compliance issue
+);
+RAISE NOTICE 'Created enum type: scheduling.conflict_type_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.conflict_type_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.conflict_type_enum IS
+'Defines categories of scheduling conflicts for classification and routing.
+Each type maps to specific resolution workflows and escalation paths.';
+
+-- Create the schedule_conflicts table
+CREATE TABLE IF NOT EXISTS scheduling.schedule_conflicts (
+-- Primary identifiers
+conflict_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+conflict_code VARCHAR(50) UNIQUE NOT NULL 
+CHECK (conflict_code ~ '^CFL-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+-- Conflict context
+schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+shift_id UUID REFERENCES scheduling.shifts(shift_id) ON DELETE SET NULL,
+
+-- Conflict classification
+conflict_type scheduling.conflict_type_enum NOT NULL,
+severity VARCHAR(20) NOT NULL DEFAULT 'MEDIUM'
+CHECK (severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+priority INTEGER DEFAULT 50 CHECK (priority BETWEEN 1 AND 100),
+
+-- Affected entities (using arrays for multiple entities)
+affected_shifts UUID[] NOT NULL DEFAULT '{}',
+affected_employees UUID[] NOT NULL DEFAULT '{}',
+affected_locations UUID[] DEFAULT '{}',
+affected_positions UUID[] DEFAULT '{}',
+affected_departments UUID[] DEFAULT '{}',
+
+-- Conflict description
+title VARCHAR(200) NOT NULL,
+description TEXT NOT NULL,
+conflict_details JSONB DEFAULT '{}'::jsonb,
+root_cause TEXT,
+
+-- Detection information
+detected_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+detection_method VARCHAR(50) NOT NULL DEFAULT 'AUTOMATED'
+CHECK (detection_method IN ('AUTOMATED', 'MANUAL', 'EMPLOYEE_REPORT', 
+                            'MANAGER_REPORT', 'SYSTEM_CHECK', 'COMPLIANCE_CHECK')),
+detection_source VARCHAR(100),
+detection_rule_id UUID, -- Reference to conflict detection rule
+
+-- Status and resolution workflow
+status scheduling.conflict_status_enum NOT NULL DEFAULT 'OPEN',
+resolution_status VARCHAR(20)
+CHECK (resolution_status IN ('AUTO_RESOLVED', 'MANUAL_RESOLUTION', 'WORKAROUND_APPLIED',
+                            'SCHEDULE_ADJUSTED', 'OVERRIDE_APPROVED', 'NO_ACTION_REQUIRED')),
+resolution_category VARCHAR(50)
+CHECK (resolution_category IN ('SCHEDULE_CHANGE', 'EMPLOYEE_REASSIGNMENT', 
+                              'SHIFT_CANCELLATION', 'OVERTIME_APPROVAL', 
+                              'EXCEPTION_GRANTED', 'POLICY_UPDATE')),
+
+-- Resolution tracking
+resolved_at TIMESTAMP WITH TIME ZONE,
+resolved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+resolution_notes TEXT,
+resolution_action TEXT,
+resolution_effectiveness INTEGER CHECK (resolution_effectiveness BETWEEN 1 AND 5),
+
+-- Impact assessment
+business_impact VARCHAR(20) 
+CHECK (business_impact IN ('MINIMAL', 'MODERATE', 'SIGNIFICANT', 'SEVERE')),
+operational_impact TEXT,
+financial_impact NUMERIC(15,2) CHECK (financial_impact >= 0),
+customer_impact VARCHAR(20) 
+CHECK (customer_impact IN ('NONE', 'LOW', 'MEDIUM', 'HIGH')),
+compliance_risk BOOLEAN NOT NULL DEFAULT FALSE,
+safety_risk BOOLEAN NOT NULL DEFAULT FALSE,
+
+-- Escalation tracking
+escalation_level INTEGER CHECK (escalation_level BETWEEN 0 AND 5),
+escalated_to UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+escalated_at TIMESTAMP WITH TIME ZONE,
+escalation_reason TEXT,
+escalation_history JSONB DEFAULT '[]'::jsonb,
+
+-- Recurrence tracking
+is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+recurrence_pattern VARCHAR(100),
+recurrence_count INTEGER NOT NULL DEFAULT 0 CHECK (recurrence_count >= 0),
+previous_conflict_id UUID REFERENCES scheduling.schedule_conflicts(conflict_id) ON DELETE SET NULL,
+related_conflicts UUID[] DEFAULT '{}',
+
+-- Prevention tracking
+prevention_action_taken BOOLEAN NOT NULL DEFAULT FALSE,
+prevention_action_description TEXT,
+prevention_effectiveness_date DATE,
+
+-- Automation tracking
+is_auto_resolvable BOOLEAN NOT NULL DEFAULT FALSE,
+auto_resolution_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+auto_resolution_success BOOLEAN,
+auto_resolution_timestamp TIMESTAMP WITH TIME ZONE,
+
+-- SLA tracking
+sla_target_hours NUMERIC(5,2) DEFAULT 4.00,
+sla_breach BOOLEAN NOT NULL DEFAULT FALSE,
+sla_breach_at TIMESTAMP WITH TIME ZONE,
+
+-- Audit columns
+created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+updated_by UUID REFERENCES hr.employees(employee_id),
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+-- System metadata
+metadata JSONB DEFAULT '{}'::jsonb,
+tags TEXT[] DEFAULT '{}',
+
+-- Constraints
+CONSTRAINT chk_conflict_resolution_timing CHECK (
+    (status IN ('RESOLVED', 'WAIVED', 'FALSE_POSITIVE', 'EXPIRED') AND resolved_at IS NOT NULL) OR
+    (status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED', 'DEFERRED') AND resolved_at IS NULL)
+),
+CONSTRAINT chk_escalation_consistency CHECK (
+    (escalation_level > 0 AND escalated_to IS NOT NULL AND escalated_at IS NOT NULL) OR
+    (escalation_level IS NULL OR escalation_level = 0)
+),
+CONSTRAINT chk_affected_entities_minimal CHECK (
+    array_length(affected_shifts, 1) >= 1 OR
+    array_length(affected_employees, 1) >= 1
+),
+CONSTRAINT chk_recurrence_consistency CHECK (
+    (is_recurring = TRUE AND recurrence_count > 0) OR
+    (is_recurring = FALSE AND recurrence_count = 0)
+),
+CONSTRAINT chk_sla_breach_timing CHECK (
+    (sla_breach = TRUE AND sla_breach_at IS NOT NULL) OR
+    (sla_breach = FALSE AND sla_breach_at IS NULL)
+)
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE OPTIMIZATION
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_schedule
+ON scheduling.schedule_conflicts(schedule_id, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_shift
+ON scheduling.schedule_conflicts(shift_id) 
+WHERE shift_id IS NOT NULL;
+
+-- Type and severity indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_type_severity
+ON scheduling.schedule_conflicts(conflict_type, severity);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_severity_priority
+ON scheduling.schedule_conflicts(severity, priority DESC);
+
+-- Status indexes (critical for workflow management)
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_status
+ON scheduling.schedule_conflicts(status, detected_at);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_open
+ON scheduling.schedule_conflicts(detected_at) 
+WHERE status IN ('OPEN', 'IN_PROGRESS');
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_escalated
+ON scheduling.schedule_conflicts(escalated_at) 
+WHERE status = 'ESCALATED';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_sla_breach
+ON scheduling.schedule_conflicts(sla_breach_at) 
+WHERE sla_breach = TRUE;
+
+-- Resolution tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_resolved
+ON scheduling.schedule_conflicts(resolved_at DESC) 
+WHERE resolved_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_resolved_by
+ON scheduling.schedule_conflicts(resolved_by, resolved_at DESC) 
+WHERE resolved_by IS NOT NULL;
+
+-- Array column indexes (GIN for array containment queries)
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_employees
+ON scheduling.schedule_conflicts USING GIN(affected_employees);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_shifts
+ON scheduling.schedule_conflicts USING GIN(affected_shifts);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_locations
+ON scheduling.schedule_conflicts USING GIN(affected_locations);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_positions
+ON scheduling.schedule_conflicts USING GIN(affected_positions);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_departments
+ON scheduling.schedule_conflicts USING GIN(affected_departments);
+
+-- Recurrence tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_recurring
+ON scheduling.schedule_conflicts(is_recurring, recurrence_count DESC) 
+WHERE is_recurring = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_previous
+ON scheduling.schedule_conflicts(previous_conflict_id) 
+WHERE previous_conflict_id IS NOT NULL;
+
+-- Automation tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_auto_resolvable
+ON scheduling.schedule_conflicts(is_auto_resolvable) 
+WHERE is_auto_resolvable = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_auto_resolution
+ON scheduling.schedule_conflicts(auto_resolution_success, auto_resolution_timestamp) 
+WHERE auto_resolution_attempted = TRUE;
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_detected
+ON scheduling.schedule_conflicts(detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_created
+ON scheduling.schedule_conflicts(created_at DESC);
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_details
+ON scheduling.schedule_conflicts USING GIN(conflict_details);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_escalation_history
+ON scheduling.schedule_conflicts USING GIN(escalation_history);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_metadata
+ON scheduling.schedule_conflicts USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_tags
+ON scheduling.schedule_conflicts USING GIN(tags);
+
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_updated_at ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_updated_at
+BEFORE UPDATE ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate conflict code
+CREATE OR REPLACE FUNCTION scheduling.generate_conflict_code()
+RETURNS TRIGGER AS $$
+DECLARE
+v_schedule_code VARCHAR(50);
+v_sequence_number INTEGER;
+v_date_suffix VARCHAR(8);
+BEGIN
+IF NEW.conflict_code IS NULL THEN
+    -- Get schedule code
+    SELECT schedule_code INTO v_schedule_code
+    FROM scheduling.schedules
+    WHERE schedule_id = NEW.schedule_id;
+    
+    -- Generate date suffix
+    v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+    
+    -- Generate sequence number for today
+    SELECT COALESCE(MAX(CAST(SUBSTRING(conflict_code FROM 13) AS INTEGER)), 0) + 1
+    INTO v_sequence_number
+    FROM scheduling.schedule_conflicts
+    WHERE conflict_code LIKE 'CFL-%-' || v_date_suffix || '-%';
+    
+    -- Format conflict code: CFL-SCHD-YYYYMMDD-###
+    NEW.conflict_code := 'CFL-' || COALESCE(SUBSTRING(v_schedule_code FROM 5), 'GEN') || '-' || 
+                         v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+END IF;
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_code ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_code
+BEFORE INSERT ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_conflict_code();
+
+-- Trigger to validate conflict resolution
+CREATE OR REPLACE FUNCTION scheduling.validate_conflict_resolution()
+RETURNS TRIGGER AS $$
+BEGIN
+-- Auto-set resolved_at when status changes to resolved
+IF OLD.status IS DISTINCT FROM NEW.status THEN
+    IF NEW.status IN ('RESOLVED', 'WAIVED', 'FALSE_POSITIVE', 'EXPIRED') THEN
+        IF NEW.resolved_at IS NULL THEN
+            NEW.resolved_at := CURRENT_TIMESTAMP;
+        END IF;
+        IF NEW.resolved_by IS NULL AND NEW.updated_by IS NOT NULL THEN
+            NEW.resolved_by := NEW.updated_by;
+        END IF;
+    ELSIF NEW.status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED', 'DEFERRED') THEN
+        NEW.resolved_at := NULL;
+        NEW.resolved_by := NULL;
+    END IF;
+END IF;
+
+-- Auto-set escalation fields when escalation_level changes
+IF OLD.escalation_level IS DISTINCT FROM NEW.escalation_level THEN
+    IF NEW.escalation_level > 0 AND (OLD.escalation_level IS NULL OR OLD.escalation_level = 0) THEN
+        IF NEW.escalated_at IS NULL THEN
+            NEW.escalated_at := CURRENT_TIMESTAMP;
+        END IF;
+    END IF;
+END IF;
+
+-- Auto-set SLA breach if resolution time exceeds target
+IF NEW.status IN ('RESOLVED', 'WAIVED') AND OLD.status NOT IN ('RESOLVED', 'WAIVED') THEN
+    IF NEW.resolved_at IS NOT NULL AND NEW.detected_at IS NOT NULL THEN
+        IF EXTRACT(EPOCH FROM (NEW.resolved_at - NEW.detected_at)) / 3600 > NEW.sla_target_hours THEN
+            NEW.sla_breach := TRUE;
+            NEW.sla_breach_at := NEW.resolved_at;
+        END IF;
+    END IF;
+END IF;
+
+-- Update recurrence tracking
+IF NEW.previous_conflict_id IS NOT NULL THEN
+    NEW.is_recurring := TRUE;
+    NEW.recurrence_count := (
+        SELECT COALESCE(recurrence_count, 0) + 1
+        FROM scheduling.schedule_conflicts
+        WHERE conflict_id = NEW.previous_conflict_id
+    );
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_resolution ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_resolution
+BEFORE INSERT OR UPDATE OF status, escalation_level, resolved_at, previous_conflict_id 
+ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_conflict_resolution();
+
+-- Trigger to log conflict status changes to audit trail
+CREATE OR REPLACE FUNCTION scheduling.log_conflict_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+IF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO system.audit_logs (
+        user_id,
+        action,
+        entity_type,
+        entity_id,
+        old_state,
+        new_state,
+        business_context,
+        created_by
+    ) VALUES (
+        COALESCE(NEW.updated_by, NEW.created_by),
+        'CONFLICT_STATUS_CHANGE',
+        'scheduling.schedule_conflicts',
+        NEW.conflict_id,
+        jsonb_build_object('status', OLD.status, 'timestamp', OLD.updated_at),
+        jsonb_build_object('status', NEW.status, 'timestamp', NEW.updated_at),
+        jsonb_build_object(
+            'conflict_type', NEW.conflict_type,
+            'severity', NEW.severity,
+            'schedule_id', NEW.schedule_id
+        ),
+        COALESCE(NEW.updated_by, NEW.created_by)
+    );
+END IF;
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_audit ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_audit
+AFTER UPDATE OF status ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.log_conflict_status_change();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_conflicts IS
+'Detects and manages scheduling conflicts with comprehensive resolution tracking and impact assessment.
+Enables proactive identification and resolution of scheduling conflicts before they impact operations.
+Supports automated conflict detection, prioritization based on severity and business impact, and 
+structured resolution workflows. Tracks conflict patterns and resolution effectiveness to identify 
+root causes and implement preventive measures. Integrates with compliance monitoring to ensure 
+conflicts do not result in labor law violations. Provides analytics for continuous process improvement.';
+
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_id IS 'Unique identifier for the conflict record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_code IS 'Business-readable conflict code (format: CFL-SCHD-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.schedule_id IS 'Reference to the schedule where conflict was detected';
+COMMENT ON COLUMN scheduling.schedule_conflicts.shift_id IS 'Primary shift involved in the conflict (if applicable)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_type IS 'Classification of conflict type for routing and resolution';
+COMMENT ON COLUMN scheduling.schedule_conflicts.severity IS 'Severity level: LOW, MEDIUM, HIGH, CRITICAL';
+COMMENT ON COLUMN scheduling.schedule_conflicts.priority IS 'Priority score 1-100 for resolution ordering';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_shifts IS 'Array of shift IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_employees IS 'Array of employee IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_locations IS 'Array of location IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_positions IS 'Array of position IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_departments IS 'Array of department IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.title IS 'Brief title summarizing the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.description IS 'Detailed description of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_details IS 'JSONB storage for structured conflict data';
+COMMENT ON COLUMN scheduling.schedule_conflicts.root_cause IS 'Identified root cause of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detected_at IS 'Timestamp when conflict was first detected';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_method IS 'How the conflict was detected (automated, manual, etc.)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_source IS 'System or person that detected the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_rule_id IS 'Reference to the conflict detection rule that triggered';
+COMMENT ON COLUMN scheduling.schedule_conflicts.status IS 'Current workflow status of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_status IS 'Method used to resolve the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_category IS 'Category of resolution action taken';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolved_at IS 'Timestamp when conflict was resolved';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolved_by IS 'Employee who resolved the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_notes IS 'Notes about the resolution process';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_action IS 'Specific action taken to resolve';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_effectiveness IS 'Effectiveness rating 1-5 of the resolution';
+COMMENT ON COLUMN scheduling.schedule_conflicts.business_impact IS 'Assessment of business impact: MINIMAL to SEVERE';
+COMMENT ON COLUMN scheduling.schedule_conflicts.operational_impact IS 'Description of operational impact';
+COMMENT ON COLUMN scheduling.schedule_conflicts.financial_impact IS 'Estimated financial impact in currency';
+COMMENT ON COLUMN scheduling.schedule_conflicts.customer_impact IS 'Assessment of customer impact: NONE to HIGH';
+COMMENT ON COLUMN scheduling.schedule_conflicts.compliance_risk IS 'Indicates if conflict poses compliance risk';
+COMMENT ON COLUMN scheduling.schedule_conflicts.safety_risk IS 'Indicates if conflict poses safety risk';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_level IS 'Current escalation level (0-5)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalated_to IS 'Employee to whom conflict was escalated';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalated_at IS 'Timestamp of escalation';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_reason IS 'Reason for escalation';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_history IS 'JSONB array of escalation history';
+COMMENT ON COLUMN scheduling.schedule_conflicts.is_recurring IS 'Indicates if this is a recurring conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.recurrence_pattern IS 'Description of recurrence pattern';
+COMMENT ON COLUMN scheduling.schedule_conflicts.recurrence_count IS 'Number of times this conflict has recurred';
+COMMENT ON COLUMN scheduling.schedule_conflicts.previous_conflict_id IS 'Reference to previous occurrence of this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.related_conflicts IS 'Array of related conflict IDs';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_action_taken IS 'Indicates if preventive action was taken';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_action_description IS 'Description of preventive action';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_effectiveness_date IS 'Date to assess prevention effectiveness';
+COMMENT ON COLUMN scheduling.schedule_conflicts.is_auto_resolvable IS 'Indicates if conflict can be auto-resolved';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_attempted IS 'Indicates if auto-resolution was attempted';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_success IS 'Result of auto-resolution attempt';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_timestamp IS 'Timestamp of auto-resolution attempt';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_target_hours IS 'Target hours for resolution per SLA';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_breach IS 'Indicates if SLA was breached';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_breach_at IS 'Timestamp when SLA was breached';
+COMMENT ON COLUMN scheduling.schedule_conflicts.created_by IS 'User who created the conflict record';
+COMMENT ON COLUMN scheduling.schedule_conflicts.created_at IS 'Timestamp when record was created';
+COMMENT ON COLUMN scheduling.schedule_conflicts.updated_by IS 'User who last updated the record';
+COMMENT ON COLUMN scheduling.schedule_conflicts.updated_at IS 'Timestamp when record was last updated';
+COMMENT ON COLUMN scheduling.schedule_conflicts.metadata IS 'Flexible JSONB metadata for extensibility';
+COMMENT ON COLUMN scheduling.schedule_conflicts.tags IS 'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+
+-- View for open conflicts requiring attention
+CREATE OR REPLACE VIEW scheduling.vw_open_conflicts AS
+SELECT
+    conflict_id,
+    conflict_code,
+    conflict_type,
+    severity,
+    priority,
+    status,
+    title,
+    description,
+    schedule_id,
+    affected_employees,
+    affected_shifts,
+    detected_at,
+    detection_method,
+    escalation_level,
+    escalated_to,
+    escalated_at,
+    sla_target_hours,
+    sla_breach,
+    sla_breach_at,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 AS hours_open,
+    CASE
+        WHEN sla_breach = TRUE THEN 'SLA_BREACHED'
+        WHEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 > sla_target_hours THEN 'SLA_AT_RISK'
+        ELSE 'WITHIN_SLA'
+    END AS sla_status,
+    CASE
+        WHEN severity = 'CRITICAL' OR sla_breach = TRUE THEN 1
+        WHEN severity = 'HIGH' OR escalation_level > 0 THEN 2
+        WHEN severity = 'MEDIUM' THEN 3
+        ELSE 4
+    END AS urgency_rank,
+    created_at,
+    updated_at
+FROM scheduling.schedule_conflicts
+WHERE status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')
+ORDER BY 
+    urgency_rank,
+    priority DESC,
+    detected_at ASC;
+
+COMMENT ON VIEW scheduling.vw_open_conflicts IS
+'View of open conflicts requiring attention, prioritized by severity, SLA status, and urgency';
+
+-- View for conflict resolution analytics
+CREATE OR REPLACE VIEW scheduling.vw_conflict_resolution_analytics AS
+SELECT
+    DATE_TRUNC('week', detected_at) AS week_start,
+    DATE_TRUNC('month', detected_at) AS month_start,
+    conflict_type,
+    severity,
+    detection_method,
+    COUNT(*) AS total_conflicts,
+    COUNT(CASE WHEN status = 'RESOLVED' THEN 1 END) AS resolved_count,
+    COUNT(CASE WHEN status = 'OPEN' THEN 1 END) AS open_count,
+    COUNT(CASE WHEN sla_breach = TRUE THEN 1 END) AS sla_breach_count,
+    COUNT(CASE WHEN is_recurring = TRUE THEN 1 END) AS recurring_count,
+    COUNT(CASE WHEN auto_resolution_success = TRUE THEN 1 END) AS auto_resolved_count,
+    ROUND(
+        COUNT(CASE WHEN status = 'RESOLVED' THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS resolution_rate,
+    ROUND(
+        COUNT(CASE WHEN sla_breach = TRUE THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS sla_breach_rate,
+    ROUND(
+        COUNT(CASE WHEN auto_resolution_success = TRUE THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(CASE WHEN auto_resolution_attempted = TRUE THEN 1 END), 0) * 100, 2
+    ) AS auto_resolution_success_rate,
+    ROUND(
+        AVG(EXTRACT(EPOCH FROM (resolved_at - detected_at)) / 3600) FILTER (WHERE resolved_at IS NOT NULL), 2
+    ) AS avg_resolution_hours,
+    ROUND(AVG(financial_impact) FILTER (WHERE financial_impact IS NOT NULL), 2) AS avg_financial_impact,
+    SUM(financial_impact) FILTER (WHERE financial_impact IS NOT NULL) AS total_financial_impact
+FROM scheduling.schedule_conflicts
+WHERE detected_at >= CURRENT_DATE - INTERVAL '90 days'
+GROUP BY 
+    DATE_TRUNC('week', detected_at),
+    DATE_TRUNC('month', detected_at),
+    conflict_type,
+    severity,
+    detection_method
+ORDER BY week_start DESC, conflict_type;
+
+COMMENT ON VIEW scheduling.vw_conflict_resolution_analytics IS
+'Analytics view for conflict resolution metrics, trends, and effectiveness';
+
+-- View for recurring conflicts requiring preventive action
+CREATE OR REPLACE VIEW scheduling.vw_recurring_conflicts AS
+SELECT
+    conflict_id,
+    conflict_code,
+    conflict_type,
+    severity,
+    recurrence_count,
+    recurrence_pattern,
+    previous_conflict_id,
+    title,
+    description,
+    root_cause,
+    prevention_action_taken,
+    prevention_action_description,
+    prevention_effectiveness_date,
+    affected_employees,
+    affected_shifts,
+    schedule_id,
+    detected_at,
+    resolved_at,
+    status,
+    CASE
+        WHEN recurrence_count >= 5 THEN 'CRITICAL_RECURRENCE'
+        WHEN recurrence_count >= 3 THEN 'HIGH_RECURRENCE'
+        WHEN recurrence_count >= 2 THEN 'MODERATE_RECURRENCE'
+        ELSE 'LOW_RECURRENCE'
+    END AS recurrence_severity,
+    CASE
+        WHEN prevention_action_taken = FALSE AND recurrence_count >= 3 
+            THEN 'PREVENTION_REQUIRED'
+        WHEN prevention_action_taken = TRUE AND prevention_effectiveness_date < CURRENT_DATE - INTERVAL '30 days'
+            THEN 'REVIEW_PREVENTION'
+        ELSE 'MONITORING'
+    END AS action_required
+FROM scheduling.schedule_conflicts
+WHERE is_recurring = TRUE
+ORDER BY recurrence_count DESC, detected_at DESC;
+
+COMMENT ON VIEW scheduling.vw_recurring_conflicts IS
+'View of recurring conflicts requiring preventive action and root cause analysis';
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES
+-- =============================================================================
+
+-- Procedure to auto-close expired conflicts
+CREATE OR REPLACE PROCEDURE scheduling.close_expired_conflicts(
+    p_days_old INTEGER DEFAULT 90,
+    p_batch_size INTEGER DEFAULT 1000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_closed_count INTEGER;
+BEGIN
+    -- Close conflicts that are old and still open
+    WITH closed AS (
+        UPDATE scheduling.schedule_conflicts
+        SET 
+            status = 'EXPIRED',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolution_notes = 'Auto-closed: Conflict no longer relevant (older than ' || p_days_old || ' days)',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE conflict_id IN (
+            SELECT conflict_id
+            FROM scheduling.schedule_conflicts
+            WHERE status IN ('OPEN', 'IN_PROGRESS')
+            AND detected_at < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_closed_count FROM closed;
+    
+    RAISE NOTICE 'Closed % expired conflicts', v_closed_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_MAINTENANCE',
+        'scheduling.close_expired_conflicts',
+        format('Closed %s expired conflicts older than %s days', v_closed_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('closed_count', v_closed_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.close_expired_conflicts IS
+'Automatically closes old conflicts that are no longer relevant to maintain table performance';
+
+-- Procedure to identify conflicts approaching SLA breach
+CREATE OR REPLACE PROCEDURE scheduling.flag_sla_at_risk_conflicts(
+    p_warning_threshold_hours NUMERIC DEFAULT 3.00
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_at_risk_count INTEGER;
+BEGIN
+    -- Update conflicts approaching SLA breach
+    WITH at_risk AS (
+        UPDATE scheduling.schedule_conflicts
+        SET 
+            metadata = metadata || jsonb_build_object('sla_warning_flagged', TRUE),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE conflict_id IN (
+            SELECT conflict_id
+            FROM scheduling.schedule_conflicts
+            WHERE status IN ('OPEN', 'IN_PROGRESS')
+            AND sla_breach = FALSE
+            AND EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 >= (sla_target_hours - p_warning_threshold_hours)
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_at_risk_count FROM at_risk;
+    
+    RAISE NOTICE 'Flagged % conflicts as SLA at-risk', v_at_risk_count;
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.flag_sla_at_risk_conflicts IS
+'Flags conflicts approaching SLA breach for proactive management';
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- Grant appropriate permissions to roles
+GRANT SELECT ON scheduling.schedule_conflicts TO reporting_role, manager_role, admin_role, hr_role;
+GRANT INSERT, UPDATE ON scheduling.schedule_conflicts TO manager_role, admin_role, hr_role;
+GRANT DELETE ON scheduling.schedule_conflicts TO admin_role;
+
+GRANT SELECT ON scheduling.vw_open_conflicts TO reporting_role, manager_role, admin_role, hr_role;
+GRANT SELECT ON scheduling.vw_conflict_resolution_analytics TO reporting_role, manager_role, admin_role;
+GRANT SELECT ON scheduling.vw_recurring_conflicts TO manager_role, admin_role, hr_role;
+
+GRANT EXECUTE ON PROCEDURE scheduling.close_expired_conflicts TO admin_role;
+GRANT EXECUTE ON PROCEDURE scheduling.flag_sla_at_risk_conflicts TO admin_role, scheduler_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table structure
+SELECT 
+    column_name, 
+    data_type, 
+    is_nullable, 
+    column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_conflicts'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT 
+    indexname, 
+    indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_conflicts'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT 
+    trigger_name, 
+    event_manipulation, 
+    action_timing,
+    event_object_table
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_conflicts';
+
+-- Verify enum types
+SELECT 
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN ('conflict_status_enum', 'conflict_type_enum')
+GROUP BY typname;
+
+-- Test query for open conflicts
+SELECT 
+    conflict_code,
+    conflict_type,
+    severity,
+    priority,
+    title,
+    status,
+    hours_open,
+    sla_status,
+    urgency_rank
+FROM scheduling.vw_open_conflicts
+WHERE urgency_rank <= 2
+LIMIT 10;
+
+-- =============================================================================
+-- SAMPLE DATA INSERTION (For Testing)
+-- =============================================================================
+
+-- Example conflict insertion (uncomment for testing)
+
+INSERT INTO scheduling.schedule_conflicts (
+    schedule_id,
+    conflict_type,
+    severity,
+    priority,
+    title,
+    description,
+    affected_shifts,
+    affected_employees,
+    detection_method,
+    sla_target_hours,
+    created_by
+)
+SELECT
+    s.schedule_id,
+    'DOUBLE_BOOKING'::scheduling.conflict_type_enum,
+    'HIGH',
+    75,
+    'Employee Double-Booked on Overlapping Shifts',
+    'Employee assigned to two shifts with overlapping time periods without adequate rest',
+    ARRAY[sh1.shift_id, sh2.shift_id],
+    ARRAY[e.employee_id],
+    'AUTOMATED',
+    4.00,
+    '00000000-0000-0000-0000-000000000000'::UUID
+FROM scheduling.schedules s
+CROSS JOIN LATERAL (
+    SELECT shift_id, employee_id, start_time, end_time
+    FROM scheduling.shifts
+    WHERE schedule_id = s.schedule_id
+    AND employee_id IS NOT NULL
+    ORDER BY start_time
+    LIMIT 2
+) sh1
+CROSS JOIN LATERAL (
+    SELECT shift_id, employee_id, start_time, end_time
+    FROM scheduling.shifts
+    WHERE schedule_id = s.schedule_id
+    AND employee_id IS NOT NULL
+    AND shift_id != sh1.shift_id
+    ORDER BY start_time
+    LIMIT 1
+) sh2
+JOIN hr.employees e ON e.employee_id = sh1.employee_id
+WHERE sh1.employee_id = sh2.employee_id
+AND sh1.end_time > sh2.start_time
+AND sh2.end_time > sh1.start_time
+LIMIT 1;
+-- =============================================================================
+-- Serial No: 29 | TABLE: scheduling.schedule_conflicts
+-- =============================================================================
+-- Description: Detects and manages scheduling conflicts with resolution tracking
+-- Business Case: This table enables proactive identification and resolution of 
+--                scheduling conflicts before they impact operations. It supports 
+--                automated conflict detection, prioritization based on severity 
+--                and business impact, and structured resolution workflows. By 
+--                tracking conflict patterns and resolution effectiveness, the 
+--                organization can identify root causes and implement preventive 
+--                measures. This reduces manual conflict resolution effort, 
+--                improves schedule reliability, and provides analytics for 
+--                continuous process improvement. The table integrates with 
+--                compliance monitoring to ensure conflicts don't result in 
+--                labor law violations.
+-- KPI: 1. Conflict detection rate (>95%), 2. Average conflict resolution time (<4 hours),
+--      3. Automated resolution rate (>60%), 4. Conflict recurrence rate (<5%),
+--      5. Manager time saved on conflict resolution (>50%), 6. Employee satisfaction 
+--      with resolution (>4/5), 7. Business impact reduction from conflicts (>80%)
+-- Feature Reference: F-SCH-029, F-SCH-030, F-COMP-003, F-ANA-010, F-MGT-002
+-- Dependencies: scheduling.schedules, scheduling.shifts, hr.employees, 
+--               hr.departments, operations.locations, hr.positions
+-- =============================================================================
+
+-- Create conflict status enum if not exists (aligned with schema standards)
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_status_enum') THEN
+CREATE TYPE scheduling.conflict_status_enum AS ENUM (
+'OPEN',              -- Conflict detected, awaiting action
+'IN_PROGRESS',       -- Resolution work underway
+'RESOLVED',          -- Conflict successfully resolved
+'ESCALATED',         -- Escalated to higher authority
+'DEFERRED',          -- Resolution postponed
+'WAIVED',            -- Conflict accepted as exception
+'FALSE_POSITIVE',    -- Detected conflict was not valid
+'EXPIRED'            -- Conflict no longer relevant
+);
+RAISE NOTICE 'Created enum type: scheduling.conflict_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.conflict_status_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.conflict_status_enum IS
+'Defines the lifecycle status of scheduling conflicts.
+OPEN: Conflict detected, awaiting action; IN_PROGRESS: Resolution work underway;
+RESOLVED: Conflict successfully resolved; ESCALATED: Escalated to higher authority;
+DEFERRED: Resolution postponed; WAIVED: Conflict accepted as exception;
+FALSE_POSITIVE: Detected conflict was not valid; EXPIRED: Conflict no longer relevant.';
+
+-- Create conflict type enum if not exists
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_type_enum') THEN
+CREATE TYPE scheduling.conflict_type_enum AS ENUM (
+'DOUBLE_BOOKING',        -- Employee assigned to multiple shifts simultaneously
+'TIME_OVERLAP',          -- Shift times overlap without adequate rest
+'UNDERSTAFFING',         -- Insufficient employees for required coverage
+'OVERSTAFFING',          -- More employees than needed (cost concern)
+'SKILL_MISMATCH',        -- Employee lacks required skills/certifications
+'AVAILABILITY_VIOLATION',-- Shift conflicts with employee availability
+'REST_PERIOD_VIOLATION', -- Insufficient rest between shifts (labor law)
+'OVERTIME_VIOLATION',    -- Exceeds maximum overtime limits
+'LOCATION_CONFLICT',     -- Employee assigned to multiple locations
+'EQUIPMENT_CONFLICT',    -- Resource/equipment double-booked
+'BUDGET_VIOLATION',      -- Schedule exceeds labor budget
+'PREFERENCE_VIOLATION',  -- Conflicts with approved employee preferences
+'UNION_RULE_VIOLATION',  -- Violates collective bargaining agreement
+'COMPLIANCE_VIOLATION'   -- General labor law compliance issue
+);
+RAISE NOTICE 'Created enum type: scheduling.conflict_type_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.conflict_type_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.conflict_type_enum IS
+'Defines categories of scheduling conflicts for classification and routing.
+Each type maps to specific resolution workflows and escalation paths.';
+
+-- Create the schedule_conflicts table
+CREATE TABLE IF NOT EXISTS scheduling.schedule_conflicts (
+-- Primary identifiers
+conflict_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+conflict_code VARCHAR(50) UNIQUE NOT NULL 
+CHECK (conflict_code ~ '^CFL-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+-- Conflict context
+schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+shift_id UUID REFERENCES scheduling.shifts(shift_id) ON DELETE SET NULL,
+
+-- Conflict classification
+conflict_type scheduling.conflict_type_enum NOT NULL,
+severity VARCHAR(20) NOT NULL DEFAULT 'MEDIUM'
+CHECK (severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+priority INTEGER DEFAULT 50 CHECK (priority BETWEEN 1 AND 100),
+
+-- Affected entities (using arrays for multiple entities)
+affected_shifts UUID[] NOT NULL DEFAULT '{}',
+affected_employees UUID[] NOT NULL DEFAULT '{}',
+affected_locations UUID[] DEFAULT '{}',
+affected_positions UUID[] DEFAULT '{}',
+affected_departments UUID[] DEFAULT '{}',
+
+-- Conflict description
+title VARCHAR(200) NOT NULL,
+description TEXT NOT NULL,
+conflict_details JSONB DEFAULT '{}'::jsonb,
+root_cause TEXT,
+
+-- Detection information
+detected_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+detection_method VARCHAR(50) NOT NULL DEFAULT 'AUTOMATED'
+CHECK (detection_method IN ('AUTOMATED', 'MANUAL', 'EMPLOYEE_REPORT', 
+                            'MANAGER_REPORT', 'SYSTEM_CHECK', 'COMPLIANCE_CHECK')),
+detection_source VARCHAR(100),
+detection_rule_id UUID, -- Reference to conflict detection rule
+
+-- Status and resolution workflow
+status scheduling.conflict_status_enum NOT NULL DEFAULT 'OPEN',
+resolution_status VARCHAR(20)
+CHECK (resolution_status IN ('AUTO_RESOLVED', 'MANUAL_RESOLUTION', 'WORKAROUND_APPLIED',
+                            'SCHEDULE_ADJUSTED', 'OVERRIDE_APPROVED', 'NO_ACTION_REQUIRED')),
+resolution_category VARCHAR(50)
+CHECK (resolution_category IN ('SCHEDULE_CHANGE', 'EMPLOYEE_REASSIGNMENT', 
+                              'SHIFT_CANCELLATION', 'OVERTIME_APPROVAL', 
+                              'EXCEPTION_GRANTED', 'POLICY_UPDATE')),
+
+-- Resolution tracking
+resolved_at TIMESTAMP WITH TIME ZONE,
+resolved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+resolution_notes TEXT,
+resolution_action TEXT,
+resolution_effectiveness INTEGER CHECK (resolution_effectiveness BETWEEN 1 AND 5),
+
+-- Impact assessment
+business_impact VARCHAR(20) 
+CHECK (business_impact IN ('MINIMAL', 'MODERATE', 'SIGNIFICANT', 'SEVERE')),
+operational_impact TEXT,
+financial_impact NUMERIC(15,2) CHECK (financial_impact >= 0),
+customer_impact VARCHAR(20) 
+CHECK (customer_impact IN ('NONE', 'LOW', 'MEDIUM', 'HIGH')),
+compliance_risk BOOLEAN NOT NULL DEFAULT FALSE,
+safety_risk BOOLEAN NOT NULL DEFAULT FALSE,
+
+-- Escalation tracking
+escalation_level INTEGER CHECK (escalation_level BETWEEN 0 AND 5),
+escalated_to UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+escalated_at TIMESTAMP WITH TIME ZONE,
+escalation_reason TEXT,
+escalation_history JSONB DEFAULT '[]'::jsonb,
+
+-- Recurrence tracking
+is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+recurrence_pattern VARCHAR(100),
+recurrence_count INTEGER NOT NULL DEFAULT 0 CHECK (recurrence_count >= 0),
+previous_conflict_id UUID REFERENCES scheduling.schedule_conflicts(conflict_id) ON DELETE SET NULL,
+related_conflicts UUID[] DEFAULT '{}',
+
+-- Prevention tracking
+prevention_action_taken BOOLEAN NOT NULL DEFAULT FALSE,
+prevention_action_description TEXT,
+prevention_effectiveness_date DATE,
+
+-- Automation tracking
+is_auto_resolvable BOOLEAN NOT NULL DEFAULT FALSE,
+auto_resolution_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+auto_resolution_success BOOLEAN,
+auto_resolution_timestamp TIMESTAMP WITH TIME ZONE,
+
+-- SLA tracking
+sla_target_hours NUMERIC(5,2) DEFAULT 4.00,
+sla_breach BOOLEAN NOT NULL DEFAULT FALSE,
+sla_breach_at TIMESTAMP WITH TIME ZONE,
+
+-- Audit columns
+created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+updated_by UUID REFERENCES hr.employees(employee_id),
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+-- System metadata
+metadata JSONB DEFAULT '{}'::jsonb,
+tags TEXT[] DEFAULT '{}',
+
+-- Constraints
+CONSTRAINT chk_conflict_resolution_timing CHECK (
+    (status IN ('RESOLVED', 'WAIVED', 'FALSE_POSITIVE', 'EXPIRED') AND resolved_at IS NOT NULL) OR
+    (status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED', 'DEFERRED') AND resolved_at IS NULL)
+),
+CONSTRAINT chk_escalation_consistency CHECK (
+    (escalation_level > 0 AND escalated_to IS NOT NULL AND escalated_at IS NOT NULL) OR
+    (escalation_level IS NULL OR escalation_level = 0)
+),
+CONSTRAINT chk_affected_entities_minimal CHECK (
+    array_length(affected_shifts, 1) >= 1 OR
+    array_length(affected_employees, 1) >= 1
+),
+CONSTRAINT chk_recurrence_consistency CHECK (
+    (is_recurring = TRUE AND recurrence_count > 0) OR
+    (is_recurring = FALSE AND recurrence_count = 0)
+),
+CONSTRAINT chk_sla_breach_timing CHECK (
+    (sla_breach = TRUE AND sla_breach_at IS NOT NULL) OR
+    (sla_breach = FALSE AND sla_breach_at IS NULL)
+)
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE OPTIMIZATION
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_schedule
+ON scheduling.schedule_conflicts(schedule_id, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_shift
+ON scheduling.schedule_conflicts(shift_id) 
+WHERE shift_id IS NOT NULL;
+
+-- Type and severity indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_type_severity
+ON scheduling.schedule_conflicts(conflict_type, severity);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_severity_priority
+ON scheduling.schedule_conflicts(severity, priority DESC);
+
+-- Status indexes (critical for workflow management)
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_status
+ON scheduling.schedule_conflicts(status, detected_at);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_open
+ON scheduling.schedule_conflicts(detected_at) 
+WHERE status IN ('OPEN', 'IN_PROGRESS');
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_escalated
+ON scheduling.schedule_conflicts(escalated_at) 
+WHERE status = 'ESCALATED';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_sla_breach
+ON scheduling.schedule_conflicts(sla_breach_at) 
+WHERE sla_breach = TRUE;
+
+-- Resolution tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_resolved
+ON scheduling.schedule_conflicts(resolved_at DESC) 
+WHERE resolved_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_resolved_by
+ON scheduling.schedule_conflicts(resolved_by, resolved_at DESC) 
+WHERE resolved_by IS NOT NULL;
+
+-- Array column indexes (GIN for array containment queries)
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_employees
+ON scheduling.schedule_conflicts USING GIN(affected_employees);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_shifts
+ON scheduling.schedule_conflicts USING GIN(affected_shifts);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_locations
+ON scheduling.schedule_conflicts USING GIN(affected_locations);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_positions
+ON scheduling.schedule_conflicts USING GIN(affected_positions);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_departments
+ON scheduling.schedule_conflicts USING GIN(affected_departments);
+
+-- Recurrence tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_recurring
+ON scheduling.schedule_conflicts(is_recurring, recurrence_count DESC) 
+WHERE is_recurring = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_previous
+ON scheduling.schedule_conflicts(previous_conflict_id) 
+WHERE previous_conflict_id IS NOT NULL;
+
+-- Automation tracking indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_auto_resolvable
+ON scheduling.schedule_conflicts(is_auto_resolvable) 
+WHERE is_auto_resolvable = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_auto_resolution
+ON scheduling.schedule_conflicts(auto_resolution_success, auto_resolution_timestamp) 
+WHERE auto_resolution_attempted = TRUE;
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_detected
+ON scheduling.schedule_conflicts(detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_created
+ON scheduling.schedule_conflicts(created_at DESC);
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_details
+ON scheduling.schedule_conflicts USING GIN(conflict_details);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_escalation_history
+ON scheduling.schedule_conflicts USING GIN(escalation_history);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_metadata
+ON scheduling.schedule_conflicts USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_tags
+ON scheduling.schedule_conflicts USING GIN(tags);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_type_status_date
+ON scheduling.schedule_conflicts(conflict_type, status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_employee_status
+ON scheduling.schedule_conflicts USING GIN(affected_employees), status, detected_at DESC;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_schedule_status
+ON scheduling.schedule_conflicts(schedule_id, status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_severity_status
+ON scheduling.schedule_conflicts(severity, status, priority DESC);
+
+-- BRIN index for time-series data (large historical tables)
+CREATE INDEX IF NOT EXISTS idx_schedule_conflicts_time_brin
+ON scheduling.schedule_conflicts USING BRIN(detected_at);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_updated_at ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_updated_at
+BEFORE UPDATE ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate conflict code
+CREATE OR REPLACE FUNCTION scheduling.generate_conflict_code()
+RETURNS TRIGGER AS $$
+DECLARE
+v_schedule_code VARCHAR(50);
+v_sequence_number INTEGER;
+v_date_suffix VARCHAR(8);
+BEGIN
+IF NEW.conflict_code IS NULL THEN
+    -- Get schedule code
+    SELECT schedule_code INTO v_schedule_code
+    FROM scheduling.schedules
+    WHERE schedule_id = NEW.schedule_id;
+    
+    -- Generate date suffix
+    v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+    
+    -- Generate sequence number for today
+    SELECT COALESCE(MAX(CAST(SUBSTRING(conflict_code FROM 13) AS INTEGER)), 0) + 1
+    INTO v_sequence_number
+    FROM scheduling.schedule_conflicts
+    WHERE conflict_code LIKE 'CFL-%-' || v_date_suffix || '-%';
+    
+    -- Format conflict code: CFL-SCHD-YYYYMMDD-###
+    NEW.conflict_code := 'CFL-' || COALESCE(SUBSTRING(v_schedule_code FROM 5), 'GEN') || '-' || 
+                         v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+END IF;
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_code ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_code
+BEFORE INSERT ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_conflict_code();
+
+-- Trigger to validate conflict resolution
+CREATE OR REPLACE FUNCTION scheduling.validate_conflict_resolution()
+RETURNS TRIGGER AS $$
+BEGIN
+-- Auto-set resolved_at when status changes to resolved
+IF OLD.status IS DISTINCT FROM NEW.status THEN
+    IF NEW.status IN ('RESOLVED', 'WAIVED', 'FALSE_POSITIVE', 'EXPIRED') THEN
+        IF NEW.resolved_at IS NULL THEN
+            NEW.resolved_at := CURRENT_TIMESTAMP;
+        END IF;
+        IF NEW.resolved_by IS NULL AND NEW.updated_by IS NOT NULL THEN
+            NEW.resolved_by := NEW.updated_by;
+        END IF;
+    ELSIF NEW.status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED', 'DEFERRED') THEN
+        NEW.resolved_at := NULL;
+        NEW.resolved_by := NULL;
+    END IF;
+END IF;
+
+-- Auto-set escalation fields when escalation_level changes
+IF OLD.escalation_level IS DISTINCT FROM NEW.escalation_level THEN
+    IF NEW.escalation_level > 0 AND (OLD.escalation_level IS NULL OR OLD.escalation_level = 0) THEN
+        IF NEW.escalated_at IS NULL THEN
+            NEW.escalated_at := CURRENT_TIMESTAMP;
+        END IF;
+    END IF;
+END IF;
+
+-- Auto-set SLA breach if resolution time exceeds target
+IF NEW.status IN ('RESOLVED', 'WAIVED') AND OLD.status NOT IN ('RESOLVED', 'WAIVED') THEN
+    IF NEW.resolved_at IS NOT NULL AND NEW.detected_at IS NOT NULL THEN
+        IF EXTRACT(EPOCH FROM (NEW.resolved_at - NEW.detected_at)) / 3600 > NEW.sla_target_hours THEN
+            NEW.sla_breach := TRUE;
+            NEW.sla_breach_at := NEW.resolved_at;
+        END IF;
+    END IF;
+END IF;
+
+-- Update recurrence tracking
+IF NEW.previous_conflict_id IS NOT NULL THEN
+    NEW.is_recurring := TRUE;
+    NEW.recurrence_count := (
+        SELECT COALESCE(recurrence_count, 0) + 1
+        FROM scheduling.schedule_conflicts
+        WHERE conflict_id = NEW.previous_conflict_id
+    );
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_resolution ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_resolution
+BEFORE INSERT OR UPDATE OF status, escalation_level, resolved_at, previous_conflict_id 
+ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_conflict_resolution();
+
+-- Trigger to log conflict status changes to audit trail
+CREATE OR REPLACE FUNCTION scheduling.log_conflict_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+IF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO system.audit_logs (
+        user_id,
+        action,
+        entity_type,
+        entity_id,
+        old_state,
+        new_state,
+        business_context,
+        created_by
+    ) VALUES (
+        COALESCE(NEW.updated_by, NEW.created_by),
+        'CONFLICT_STATUS_CHANGE',
+        'scheduling.schedule_conflicts',
+        NEW.conflict_id,
+        jsonb_build_object('status', OLD.status, 'timestamp', OLD.updated_at),
+        jsonb_build_object('status', NEW.status, 'timestamp', NEW.updated_at),
+        jsonb_build_object(
+            'conflict_type', NEW.conflict_type,
+            'severity', NEW.severity,
+            'schedule_id', NEW.schedule_id
+        ),
+        COALESCE(NEW.updated_by, NEW.created_by)
+    );
+END IF;
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_conflicts_audit ON scheduling.schedule_conflicts;
+CREATE TRIGGER trg_schedule_conflicts_audit
+AFTER UPDATE OF status ON scheduling.schedule_conflicts
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.log_conflict_status_change();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_conflicts IS
+'Detects and manages scheduling conflicts with comprehensive resolution tracking and impact assessment.
+Enables proactive identification and resolution of scheduling conflicts before they impact operations.
+Supports automated conflict detection, prioritization based on severity and business impact, and 
+structured resolution workflows. Tracks conflict patterns and resolution effectiveness to identify 
+root causes and implement preventive measures. Integrates with compliance monitoring to ensure 
+conflicts do not result in labor law violations. Provides analytics for continuous process improvement.';
+
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_id IS 'Unique identifier for the conflict record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_code IS 'Business-readable conflict code (format: CFL-SCHD-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.schedule_id IS 'Reference to the schedule where conflict was detected';
+COMMENT ON COLUMN scheduling.schedule_conflicts.shift_id IS 'Primary shift involved in the conflict (if applicable)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_type IS 'Classification of conflict type for routing and resolution';
+COMMENT ON COLUMN scheduling.schedule_conflicts.severity IS 'Severity level: LOW, MEDIUM, HIGH, CRITICAL';
+COMMENT ON COLUMN scheduling.schedule_conflicts.priority IS 'Priority score 1-100 for resolution ordering';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_shifts IS 'Array of shift IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_employees IS 'Array of employee IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_locations IS 'Array of location IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_positions IS 'Array of position IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.affected_departments IS 'Array of department IDs affected by this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.title IS 'Brief title summarizing the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.description IS 'Detailed description of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.conflict_details IS 'JSONB storage for structured conflict data';
+COMMENT ON COLUMN scheduling.schedule_conflicts.root_cause IS 'Identified root cause of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detected_at IS 'Timestamp when conflict was first detected';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_method IS 'How the conflict was detected (automated, manual, etc.)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_source IS 'System or person that detected the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.detection_rule_id IS 'Reference to the conflict detection rule that triggered';
+COMMENT ON COLUMN scheduling.schedule_conflicts.status IS 'Current workflow status of the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_status IS 'Method used to resolve the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_category IS 'Category of resolution action taken';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolved_at IS 'Timestamp when conflict was resolved';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolved_by IS 'Employee who resolved the conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_notes IS 'Notes about the resolution process';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_action IS 'Specific action taken to resolve';
+COMMENT ON COLUMN scheduling.schedule_conflicts.resolution_effectiveness IS 'Effectiveness rating 1-5 of the resolution';
+COMMENT ON COLUMN scheduling.schedule_conflicts.business_impact IS 'Assessment of business impact: MINIMAL to SEVERE';
+COMMENT ON COLUMN scheduling.schedule_conflicts.operational_impact IS 'Description of operational impact';
+COMMENT ON COLUMN scheduling.schedule_conflicts.financial_impact IS 'Estimated financial impact in currency';
+COMMENT ON COLUMN scheduling.schedule_conflicts.customer_impact IS 'Assessment of customer impact: NONE to HIGH';
+COMMENT ON COLUMN scheduling.schedule_conflicts.compliance_risk IS 'Indicates if conflict poses compliance risk';
+COMMENT ON COLUMN scheduling.schedule_conflicts.safety_risk IS 'Indicates if conflict poses safety risk';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_level IS 'Current escalation level (0-5)';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalated_to IS 'Employee to whom conflict was escalated';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalated_at IS 'Timestamp of escalation';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_reason IS 'Reason for escalation';
+COMMENT ON COLUMN scheduling.schedule_conflicts.escalation_history IS 'JSONB array of escalation history';
+COMMENT ON COLUMN scheduling.schedule_conflicts.is_recurring IS 'Indicates if this is a recurring conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.recurrence_pattern IS 'Description of recurrence pattern';
+COMMENT ON COLUMN scheduling.schedule_conflicts.recurrence_count IS 'Number of times this conflict has recurred';
+COMMENT ON COLUMN scheduling.schedule_conflicts.previous_conflict_id IS 'Reference to previous occurrence of this conflict';
+COMMENT ON COLUMN scheduling.schedule_conflicts.related_conflicts IS 'Array of related conflict IDs';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_action_taken IS 'Indicates if preventive action was taken';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_action_description IS 'Description of preventive action';
+COMMENT ON COLUMN scheduling.schedule_conflicts.prevention_effectiveness_date IS 'Date to assess prevention effectiveness';
+COMMENT ON COLUMN scheduling.schedule_conflicts.is_auto_resolvable IS 'Indicates if conflict can be auto-resolved';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_attempted IS 'Indicates if auto-resolution was attempted';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_success IS 'Result of auto-resolution attempt';
+COMMENT ON COLUMN scheduling.schedule_conflicts.auto_resolution_timestamp IS 'Timestamp of auto-resolution attempt';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_target_hours IS 'Target hours for resolution per SLA';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_breach IS 'Indicates if SLA was breached';
+COMMENT ON COLUMN scheduling.schedule_conflicts.sla_breach_at IS 'Timestamp when SLA was breached';
+COMMENT ON COLUMN scheduling.schedule_conflicts.created_by IS 'User who created the conflict record';
+COMMENT ON COLUMN scheduling.schedule_conflicts.created_at IS 'Timestamp when record was created';
+COMMENT ON COLUMN scheduling.schedule_conflicts.updated_by IS 'User who last updated the record';
+COMMENT ON COLUMN scheduling.schedule_conflicts.updated_at IS 'Timestamp when record was last updated';
+COMMENT ON COLUMN scheduling.schedule_conflicts.metadata IS 'Flexible JSONB metadata for extensibility';
+COMMENT ON COLUMN scheduling.schedule_conflicts.tags IS 'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+
+-- View for open conflicts requiring attention
+CREATE OR REPLACE VIEW scheduling.vw_open_conflicts AS
+SELECT
+    conflict_id,
+    conflict_code,
+    conflict_type,
+    severity,
+    priority,
+    status,
+    title,
+    description,
+    schedule_id,
+    affected_employees,
+    affected_shifts,
+    detected_at,
+    detection_method,
+    escalation_level,
+    escalated_to,
+    escalated_at,
+    sla_target_hours,
+    sla_breach,
+    sla_breach_at,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 AS hours_open,
+    CASE
+        WHEN sla_breach = TRUE THEN 'SLA_BREACHED'
+        WHEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 > sla_target_hours THEN 'SLA_AT_RISK'
+        ELSE 'WITHIN_SLA'
+    END AS sla_status,
+    CASE
+        WHEN severity = 'CRITICAL' OR sla_breach = TRUE THEN 1
+        WHEN severity = 'HIGH' OR escalation_level > 0 THEN 2
+        WHEN severity = 'MEDIUM' THEN 3
+        ELSE 4
+    END AS urgency_rank,
+    created_at,
+    updated_at
+FROM scheduling.schedule_conflicts
+WHERE status IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')
+ORDER BY 
+    urgency_rank,
+    priority DESC,
+    detected_at ASC;
+
+COMMENT ON VIEW scheduling.vw_open_conflicts IS
+'View of open conflicts requiring attention, prioritized by severity, SLA status, and urgency';
+
+-- View for conflict resolution analytics
+CREATE OR REPLACE VIEW scheduling.vw_conflict_resolution_analytics AS
+SELECT
+    DATE_TRUNC('week', detected_at) AS week_start,
+    DATE_TRUNC('month', detected_at) AS month_start,
+    conflict_type,
+    severity,
+    detection_method,
+    COUNT(*) AS total_conflicts,
+    COUNT(CASE WHEN status = 'RESOLVED' THEN 1 END) AS resolved_count,
+    COUNT(CASE WHEN status = 'OPEN' THEN 1 END) AS open_count,
+    COUNT(CASE WHEN sla_breach = TRUE THEN 1 END) AS sla_breach_count,
+    COUNT(CASE WHEN is_recurring = TRUE THEN 1 END) AS recurring_count,
+    COUNT(CASE WHEN auto_resolution_success = TRUE THEN 1 END) AS auto_resolved_count,
+    ROUND(
+        COUNT(CASE WHEN status = 'RESOLVED' THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS resolution_rate,
+    ROUND(
+        COUNT(CASE WHEN sla_breach = TRUE THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS sla_breach_rate,
+    ROUND(
+        COUNT(CASE WHEN auto_resolution_success = TRUE THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(CASE WHEN auto_resolution_attempted = TRUE THEN 1 END), 0) * 100, 2
+    ) AS auto_resolution_success_rate,
+    ROUND(
+        AVG(EXTRACT(EPOCH FROM (resolved_at - detected_at)) / 3600) FILTER (WHERE resolved_at IS NOT NULL), 2
+    ) AS avg_resolution_hours,
+    ROUND(AVG(financial_impact) FILTER (WHERE financial_impact IS NOT NULL), 2) AS avg_financial_impact,
+    SUM(financial_impact) FILTER (WHERE financial_impact IS NOT NULL) AS total_financial_impact
+FROM scheduling.schedule_conflicts
+WHERE detected_at >= CURRENT_DATE - INTERVAL '90 days'
+GROUP BY 
+    DATE_TRUNC('week', detected_at),
+    DATE_TRUNC('month', detected_at),
+    conflict_type,
+    severity,
+    detection_method
+ORDER BY week_start DESC, conflict_type;
+
+COMMENT ON VIEW scheduling.vw_conflict_resolution_analytics IS
+'Analytics view for conflict resolution metrics, trends, and effectiveness';
+
+-- View for recurring conflicts requiring preventive action
+CREATE OR REPLACE VIEW scheduling.vw_recurring_conflicts AS
+SELECT
+    conflict_id,
+    conflict_code,
+    conflict_type,
+    severity,
+    recurrence_count,
+    recurrence_pattern,
+    previous_conflict_id,
+    title,
+    description,
+    root_cause,
+    prevention_action_taken,
+    prevention_action_description,
+    prevention_effectiveness_date,
+    affected_employees,
+    affected_shifts,
+    schedule_id,
+    detected_at,
+    resolved_at,
+    status,
+    CASE
+        WHEN recurrence_count >= 5 THEN 'CRITICAL_RECURRENCE'
+        WHEN recurrence_count >= 3 THEN 'HIGH_RECURRENCE'
+        WHEN recurrence_count >= 2 THEN 'MODERATE_RECURRENCE'
+        ELSE 'LOW_RECURRENCE'
+    END AS recurrence_severity,
+    CASE
+        WHEN prevention_action_taken = FALSE AND recurrence_count >= 3 
+            THEN 'PREVENTION_REQUIRED'
+        WHEN prevention_action_taken = TRUE AND prevention_effectiveness_date < CURRENT_DATE - INTERVAL '30 days'
+            THEN 'REVIEW_PREVENTION'
+        ELSE 'MONITORING'
+    END AS action_required
+FROM scheduling.schedule_conflicts
+WHERE is_recurring = TRUE
+ORDER BY recurrence_count DESC, detected_at DESC;
+
+COMMENT ON VIEW scheduling.vw_recurring_conflicts IS
+'View of recurring conflicts requiring preventive action and root cause analysis';
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES
+-- =============================================================================
+
+-- Procedure to auto-close expired conflicts
+CREATE OR REPLACE PROCEDURE scheduling.close_expired_conflicts(
+    p_days_old INTEGER DEFAULT 90,
+    p_batch_size INTEGER DEFAULT 1000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_closed_count INTEGER;
+BEGIN
+    -- Close conflicts that are old and still open
+    WITH closed AS (
+        UPDATE scheduling.schedule_conflicts
+        SET 
+            status = 'EXPIRED',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolution_notes = 'Auto-closed: Conflict no longer relevant (older than ' || p_days_old || ' days)',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE conflict_id IN (
+            SELECT conflict_id
+            FROM scheduling.schedule_conflicts
+            WHERE status IN ('OPEN', 'IN_PROGRESS')
+            AND detected_at < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_closed_count FROM closed;
+    
+    RAISE NOTICE 'Closed % expired conflicts', v_closed_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_MAINTENANCE',
+        'scheduling.close_expired_conflicts',
+        format('Closed %s expired conflicts older than %s days', v_closed_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('closed_count', v_closed_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.close_expired_conflicts IS
+'Automatically closes old conflicts that are no longer relevant to maintain table performance';
+
+-- Procedure to identify conflicts approaching SLA breach
+CREATE OR REPLACE PROCEDURE scheduling.flag_sla_at_risk_conflicts(
+    p_warning_threshold_hours NUMERIC DEFAULT 3.00
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_at_risk_count INTEGER;
+BEGIN
+    -- Update conflicts approaching SLA breach
+    WITH at_risk AS (
+        UPDATE scheduling.schedule_conflicts
+        SET 
+            metadata = metadata || jsonb_build_object('sla_warning_flagged', TRUE),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE conflict_id IN (
+            SELECT conflict_id
+            FROM scheduling.schedule_conflicts
+            WHERE status IN ('OPEN', 'IN_PROGRESS')
+            AND sla_breach = FALSE
+            AND EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - detected_at)) / 3600 >= (sla_target_hours - p_warning_threshold_hours)
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_at_risk_count FROM at_risk;
+    
+    RAISE NOTICE 'Flagged % conflicts as SLA at-risk', v_at_risk_count;
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.flag_sla_at_risk_conflicts IS
+'Flags conflicts approaching SLA breach for proactive management';
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- Grant appropriate permissions to roles
+GRANT SELECT ON scheduling.schedule_conflicts TO reporting_role, manager_role, admin_role, hr_role;
+GRANT INSERT, UPDATE ON scheduling.schedule_conflicts TO manager_role, admin_role, hr_role;
+GRANT DELETE ON scheduling.schedule_conflicts TO admin_role;
+
+GRANT SELECT ON scheduling.vw_open_conflicts TO reporting_role, manager_role, admin_role, hr_role;
+GRANT SELECT ON scheduling.vw_conflict_resolution_analytics TO reporting_role, manager_role, admin_role;
+GRANT SELECT ON scheduling.vw_recurring_conflicts TO manager_role, admin_role, hr_role;
+
+GRANT EXECUTE ON PROCEDURE scheduling.close_expired_conflicts TO admin_role;
+GRANT EXECUTE ON PROCEDURE scheduling.flag_sla_at_risk_conflicts TO admin_role, scheduler_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table structure
+SELECT 
+    column_name, 
+    data_type, 
+    is_nullable, 
+    column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_conflicts'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT 
+    indexname, 
+    indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_conflicts'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT 
+    trigger_name, 
+    event_manipulation, 
+    action_timing,
+    event_object_table
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_conflicts';
+
+-- Verify enum types
+SELECT 
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN ('conflict_status_enum', 'conflict_type_enum')
+GROUP BY typname;
+
+-- Test query for open conflicts
+SELECT 
+    conflict_code,
+    conflict_type,
+    severity,
+    priority,
+    title,
+    status,
+    hours_open,
+    sla_status,
+    urgency_rank
+FROM scheduling.vw_open_conflicts
+WHERE urgency_rank <= 2
+LIMIT 10;
+
+-- =============================================================================
+-- SAMPLE DATA INSERTION (For Testing)
+-- =============================================================================
+
+-- Example conflict insertion (uncomment for testing)
+
+INSERT INTO scheduling.schedule_conflicts (
+    schedule_id,
+    conflict_type,
+    severity,
+    priority,
+    title,
+    description,
+    affected_shifts,
+    affected_employees,
+    detection_method,
+    sla_target_hours,
+    created_by
+)
+SELECT
+    s.schedule_id,
+    'DOUBLE_BOOKING'::scheduling.conflict_type_enum,
+    'HIGH',
+    75,
+    'Employee Double-Booked on Overlapping Shifts',
+    'Employee assigned to two shifts with overlapping time periods without adequate rest',
+    ARRAY[sh1.shift_id, sh2.shift_id],
+    ARRAY[e.employee_id],
+    'AUTOMATED',
+    4.00,
+    '00000000-0000-0000-0000-000000000000'::UUID
+FROM scheduling.schedules s
+CROSS JOIN LATERAL (
+    SELECT shift_id, employee_id, start_time, end_time
+    FROM scheduling.shifts
+    WHERE schedule_id = s.schedule_id
+    AND employee_id IS NOT NULL
+    ORDER BY start_time
+    LIMIT 2
+) sh1
+CROSS JOIN LATERAL (
+    SELECT shift_id, employee_id, start_time, end_time
+    FROM scheduling.shifts
+    WHERE schedule_id = s.schedule_id
+    AND employee_id IS NOT NULL
+    AND shift_id != sh1.shift_id
+    ORDER BY start_time
+    LIMIT 1
+) sh2
+JOIN hr.employees e ON e.employee_id = sh1.employee_id
+WHERE sh1.employee_id = sh2.employee_id
+AND sh1.end_time > sh2.start_time
+AND sh2.end_time > sh1.start_time
+LIMIT 1;
+
+
+
+-- Serial No: 30 | TABLE: scheduling.employee_shift_feedback
+-- Description: Captures employee feedback on shifts for continuous improvement
+-- Business Case: Enables data-driven improvement of scheduling practices by collecting
+--                employee feedback on shift assignments, working conditions, and scheduling
+--                processes. Supports employee engagement and provides actionable insights
+--                for schedule optimization. Identifies pain points and improvement opportunities.
+-- KPI: 1. Feedback submission rate (>40%), 2. Average feedback rating (>4/5),
+--      3. Feedback response time (<72 hours), 4. Improvement implementation rate (>60%),
+--      5. Employee satisfaction trend improvement (>10%), 6. Feedback completeness rate (>85%),
+--      7. Manager action rate on feedback (>70%)
+CREATE TABLE IF NOT EXISTS scheduling.employee_shift_feedback (
+    feedback_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    feedback_code VARCHAR(50) UNIQUE NOT NULL CHECK (feedback_code ~ '^FBK-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+    -- Feedback context
+    shift_id UUID NOT NULL REFERENCES scheduling.shifts(shift_id),
+    employee_id UUID NOT NULL REFERENCES hr.employees(employee_id),
+
+    -- Feedback categories
+    feedback_category VARCHAR(50) NOT NULL
+        CHECK (feedback_category IN ('SHIFT_TIMING', 'WORKLOAD', 'WORKING_CONDITIONS',
+                                    'TEAM_DYNAMICS', 'MANAGEMENT_SUPPORT', 'TRAINING',
+                                    'EQUIPMENT', 'SAFETY', 'COMMUNICATION', 'OTHER')),
+
+    -- Rating metrics (1-5 scale)
+    overall_rating INTEGER NOT NULL CHECK (overall_rating BETWEEN 1 AND 5),
+    workload_rating INTEGER CHECK (workload_rating BETWEEN 1 AND 5),
+    support_rating INTEGER CHECK (support_rating BETWEEN 1 AND 5),
+    equipment_rating INTEGER CHECK (equipment_rating BETWEEN 1 AND 5),
+    safety_rating INTEGER CHECK (safety_rating BETWEEN 1 AND 5),
+
+    -- Detailed feedback
+    positive_aspects TEXT,
+    areas_for_improvement TEXT,
+    specific_issues TEXT,
+    suggestions TEXT,
+
+    -- Status and follow-up
+    status VARCHAR(20) NOT NULL DEFAULT 'SUBMITTED'
+        CHECK (status IN ('SUBMITTED', 'REVIEWED', 'ACTION_PLANNED', 'ACTION_TAKEN', 'CLOSED', 'ESCALATED')),
+
+    -- Manager response
+    reviewed_by UUID REFERENCES hr.employees(employee_id),
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    manager_response TEXT,
+    action_plan TEXT,
+
+    -- Action tracking
+    action_taken TEXT,
+    action_taken_by UUID REFERENCES hr.employees(employee_id),
+    action_completed_at TIMESTAMP WITH TIME ZONE,
+
+    -- Impact assessment
+    feedback_impact VARCHAR(20) CHECK (feedback_impact IN ('MINOR', 'MODERATE', 'SIGNIFICANT', 'MAJOR')),
+    improvement_implemented BOOLEAN NOT NULL DEFAULT FALSE,
+    improvement_impact_assessment TEXT,
+
+    -- Anonymity and privacy
+    is_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_follow_up BOOLEAN NOT NULL DEFAULT TRUE,
+
+    -- Submission details
+    submitted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    submission_channel VARCHAR(50) NOT NULL DEFAULT 'WEB'
+        CHECK (submission_channel IN ('WEB', 'MOBILE', 'EMAIL', 'IN_PERSON', 'SURVEY')),
+
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+
+    -- Constraints
+    CONSTRAINT chk_feedback_review CHECK (
+        (status IN ('REVIEWED', 'ACTION_PLANNED', 'ACTION_TAKEN', 'CLOSED', 'ESCALATED') AND
+         reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL) OR
+        (status = 'SUBMITTED' AND reviewed_by IS NULL AND reviewed_at IS NULL)
+    ),
+    CONSTRAINT chk_action_tracking CHECK (
+        (action_taken IS NOT NULL AND action_taken_by IS NOT NULL AND action_completed_at IS NOT NULL) OR
+        (action_taken IS NULL AND action_taken_by IS NULL AND action_completed_at IS NULL)
+    ),
+    CONSTRAINT chk_rating_consistency CHECK (
+        overall_rating >= 1 AND overall_rating <= 5 AND
+        (workload_rating IS NULL OR (workload_rating >= 1 AND workload_rating <= 5)) AND
+        (support_rating IS NULL OR (support_rating >= 1 AND support_rating <= 5))
+    )
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_employee
+ON scheduling.employee_shift_feedback(employee_id, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_shift
+ON scheduling.employee_shift_feedback(shift_id, overall_rating);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_category
+ON scheduling.employee_shift_feedback(feedback_category, status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_rating
+ON scheduling.employee_shift_feedback(overall_rating DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_reviewed
+ON scheduling.employee_shift_feedback(reviewed_at) WHERE reviewed_at IS NOT NULL;
+
+COMMENT ON TABLE scheduling.employee_shift_feedback IS 'Captures employee feedback on shifts for continuous improvement and engagement measurement';
+
+
+-- =============================================================================
+-- Serial No: 30 | TABLE: scheduling.employee_shift_feedback
+-- =============================================================================
+-- Description: Captures employee feedback on shifts for continuous improvement
+-- Business Case: Enables data-driven improvement of scheduling practices by collecting
+--                employee feedback on shift assignments, working conditions, and scheduling
+--                processes. Supports employee engagement and provides actionable insights
+--                for schedule optimization. Identifies pain points and improvement opportunities.
+--                Integrates with performance management and schedule optimization systems.
+-- KPI: 1. Feedback submission rate (>40%), 2. Average feedback rating (>4/5),
+--      3. Feedback response time (<72 hours), 4. Improvement implementation rate (>60%),
+--      5. Employee satisfaction trend improvement (>10%), 6. Feedback completeness rate (>85%),
+--      7. Manager action rate on feedback (>70%)
+-- Feature Reference: F-FBK-001, F-FBK-002, F-FBK-003, F-FBK-004, F-FBK-005,
+--                    F-FBK-006, F-FBK-007, F-FBK-008, F-FBK-009, F-FBK-010
+-- Dependencies: scheduling.shifts, hr.employees, scheduling.schedule_compliance,
+--               analytics.performance_metrics
+-- =============================================================================
+
+-- Create feedback status enum if not exists (aligned with schema standards)
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'feedback_status_enum') THEN
+CREATE TYPE scheduling.feedback_status_enum AS ENUM (
+'SUBMITTED',          -- Feedback submitted by employee
+'REVIEWED',           -- Feedback reviewed by manager
+'ACTION_PLANNED',     -- Action plan created
+'ACTION_IN_PROGRESS', -- Action being implemented
+'ACTION_TAKEN',       -- Action completed
+'CLOSED',             -- Feedback cycle closed
+'ESCALATED',          -- Escalated to higher management
+'REJECTED',          -- Feedback rejected (with reason)
+'PENDING_REVIEW'      -- Awaiting manager review
+);
+RAISE NOTICE 'Created enum type: scheduling.feedback_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.feedback_status_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.feedback_status_enum IS
+'Defines the lifecycle status of employee shift feedback.
+SUBMITTED: Feedback submitted by employee; REVIEWED: Feedback reviewed by manager;
+ACTION_PLANNED: Action plan created; ACTION_IN_PROGRESS: Action being implemented;
+ACTION_TAKEN: Action completed; CLOSED: Feedback cycle closed;
+ESCALATED: Escalated to higher management; REJECTED: Feedback rejected (with reason);
+PENDING_REVIEW: Awaiting manager review.';
+
+-- Create feedback impact enum if not exists
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'feedback_impact_enum') THEN
+CREATE TYPE scheduling.feedback_impact_enum AS ENUM (
+'MINOR',              -- Minor impact, low priority
+'MODERATE',           -- Moderate impact, medium priority
+'SIGNIFICANT',        -- Significant impact, high priority
+'MAJOR',              -- Major impact, critical priority
+'CRITICAL'            -- Critical impact, immediate action required
+);
+RAISE NOTICE 'Created enum type: scheduling.feedback_impact_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.feedback_impact_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.feedback_impact_enum IS
+'Defines the impact level of employee feedback for prioritization.
+MINOR: Minor impact, low priority; MODERATE: Moderate impact, medium priority;
+SIGNIFICANT: Significant impact, high priority; MAJOR: Major impact, critical priority;
+CRITICAL: Critical impact, immediate action required.';
+
+-- Create the employee_shift_feedback table
+CREATE TABLE IF NOT EXISTS scheduling.employee_shift_feedback (
+    -- Primary identifiers
+    feedback_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    feedback_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (feedback_code ~ '^FBK-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+    -- Feedback context (foreign keys to existing tables)
+    shift_id UUID NOT NULL REFERENCES scheduling.shifts(shift_id) ON DELETE CASCADE,
+    employee_id UUID NOT NULL REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+    schedule_id UUID REFERENCES scheduling.schedules(schedule_id) ON DELETE SET NULL,
+    department_id UUID REFERENCES hr.departments(department_id) ON DELETE SET NULL,
+    location_id UUID REFERENCES operations.locations(location_id) ON DELETE SET NULL,
+
+    -- Feedback categorization
+    feedback_category VARCHAR(50) NOT NULL
+        CHECK (feedback_category IN ('SHIFT_TIMING', 'WORKLOAD', 'WORKING_CONDITIONS',
+                                    'TEAM_DYNAMICS', 'MANAGEMENT_SUPPORT', 'TRAINING',
+                                    'EQUIPMENT', 'SAFETY', 'COMMUNICATION', 'SCHEDULING_PROCESS',
+                                    'WORK_LIFE_BALANCE', 'COMPENSATION', 'OTHER')),
+
+    feedback_subcategory VARCHAR(50),
+
+    -- Rating metrics (1-5 scale, consistent with performance_metrics)
+    overall_rating INTEGER NOT NULL CHECK (overall_rating BETWEEN 1 AND 5),
+    workload_rating INTEGER CHECK (workload_rating BETWEEN 1 AND 5),
+    support_rating INTEGER CHECK (support_rating BETWEEN 1 AND 5),
+    equipment_rating INTEGER CHECK (equipment_rating BETWEEN 1 AND 5),
+    safety_rating INTEGER CHECK (safety_rating BETWEEN 1 AND 5),
+    scheduling_rating INTEGER CHECK (scheduling_rating BETWEEN 1 AND 5),
+    communication_rating INTEGER CHECK (communication_rating BETWEEN 1 AND 5),
+
+    -- Detailed feedback (text fields for qualitative data)
+    positive_aspects TEXT,
+    areas_for_improvement TEXT,
+    specific_issues TEXT,
+    suggestions TEXT,
+    additional_comments TEXT,
+
+    -- Status and workflow (using enum type)
+    status scheduling.feedback_status_enum NOT NULL DEFAULT 'SUBMITTED',
+    priority INTEGER DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
+
+    -- Manager response and review
+    reviewed_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    review_notes TEXT,
+    manager_response TEXT,
+    action_plan TEXT,
+    expected_resolution_date DATE,
+
+    -- Action tracking
+    action_taken TEXT,
+    action_taken_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    action_completed_at TIMESTAMP WITH TIME ZONE,
+    action_effectiveness_rating INTEGER CHECK (action_effectiveness_rating BETWEEN 1 AND 5),
+
+    -- Impact assessment (using enum type)
+    feedback_impact scheduling.feedback_impact_enum,
+    improvement_implemented BOOLEAN NOT NULL DEFAULT FALSE,
+    improvement_impact_assessment TEXT,
+    business_impact_score NUMERIC(5,2) CHECK (business_impact_score BETWEEN 0 AND 100),
+
+    -- Anonymity and privacy controls
+    is_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_follow_up BOOLEAN NOT NULL DEFAULT TRUE,
+    confidential BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Submission details
+    submitted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    submission_channel VARCHAR(50) NOT NULL DEFAULT 'WEB'
+        CHECK (submission_channel IN ('WEB', 'MOBILE', 'EMAIL', 'IN_PERSON', 'SURVEY', 'KIOSK', 'API')),
+    submission_device_type VARCHAR(50),
+    submission_ip_address INET,
+
+    -- Follow-up tracking
+    follow_up_required BOOLEAN NOT NULL DEFAULT FALSE,
+    follow_up_completed BOOLEAN NOT NULL DEFAULT FALSE,
+    follow_up_date DATE,
+    follow_up_notes TEXT,
+
+    -- Integration and linkage
+    related_compliance_id UUID REFERENCES scheduling.schedule_compliance(compliance_id) ON DELETE SET NULL,
+    related_survey_id UUID REFERENCES hr.employee_surveys(survey_id) ON DELETE SET NULL,
+    related_incident_id UUID,
+
+    -- Metrics and analytics
+    sentiment_score NUMERIC(3,2) CHECK (sentiment_score BETWEEN -1.0 AND 1.0),
+    urgency_score NUMERIC(3,2) CHECK (urgency_score BETWEEN 0 AND 10),
+    response_time_hours NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+        WHEN reviewed_at IS NOT NULL AND submitted_at IS NOT NULL
+        THEN EXTRACT(EPOCH FROM (reviewed_at - submitted_at)) / 3600
+        ELSE NULL
+        END
+    ) STORED,
+
+    -- Audit columns (consistent with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- System metadata (JSONB for extensibility)
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+
+    -- Constraints
+    CONSTRAINT chk_feedback_review CHECK (
+        (status IN ('REVIEWED', 'ACTION_PLANNED', 'ACTION_IN_PROGRESS', 'ACTION_TAKEN', 'CLOSED', 'ESCALATED', 'REJECTED') AND
+         reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL) OR
+        (status IN ('SUBMITTED', 'PENDING_REVIEW') AND reviewed_by IS NULL AND reviewed_at IS NULL)
+    ),
+    CONSTRAINT chk_action_tracking CHECK (
+        (action_taken IS NOT NULL AND action_taken_by IS NOT NULL AND action_completed_at IS NOT NULL) OR
+        (action_taken IS NULL AND action_taken_by IS NULL AND action_completed_at IS NULL)
+    ),
+    CONSTRAINT chk_rating_consistency CHECK (
+        overall_rating >= 1 AND overall_rating <= 5 AND
+        (workload_rating IS NULL OR (workload_rating >= 1 AND workload_rating <= 5)) AND
+        (support_rating IS NULL OR (support_rating >= 1 AND support_rating <= 5)) AND
+        (equipment_rating IS NULL OR (equipment_rating >= 1 AND equipment_rating <= 5)) AND
+        (safety_rating IS NULL OR (safety_rating >= 1 AND safety_rating <= 5)) AND
+        (scheduling_rating IS NULL OR (scheduling_rating >= 1 AND scheduling_rating <= 5)) AND
+        (communication_rating IS NULL OR (communication_rating >= 1 AND communication_rating <= 5))
+    ),
+    CONSTRAINT chk_follow_up_logic CHECK (
+        (follow_up_required = TRUE AND follow_up_date IS NOT NULL) OR
+        (follow_up_required = FALSE)
+    ),
+    CONSTRAINT chk_action_effectiveness CHECK (
+        (action_completed_at IS NOT NULL AND action_effectiveness_rating IS NOT NULL) OR
+        (action_completed_at IS NULL AND action_effectiveness_rating IS NULL)
+    ),
+    CONSTRAINT chk_feedback_dates CHECK (
+        (action_completed_at IS NULL OR action_completed_at >= reviewed_at) OR
+        (reviewed_at IS NULL)
+    )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE OPTIMIZATION
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_employee
+ON scheduling.employee_shift_feedback(employee_id, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_shift
+ON scheduling.employee_shift_feedback(shift_id);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_schedule
+ON scheduling.employee_shift_feedback(schedule_id) WHERE schedule_id IS NOT NULL;
+
+-- Category and status indexes (for filtering and reporting)
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_category
+ON scheduling.employee_shift_feedback(feedback_category, status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_status
+ON scheduling.employee_shift_feedback(status, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_priority
+ON scheduling.employee_shift_feedback(priority DESC, status);
+
+-- Rating indexes (for analytics and trends)
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_rating
+ON scheduling.employee_shift_feedback(overall_rating DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_safety_rating
+ON scheduling.employee_shift_feedback(safety_rating) WHERE safety_rating IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_sentiment
+ON scheduling.employee_shift_feedback(sentiment_score) WHERE sentiment_score IS NOT NULL;
+
+-- Review and action tracking indexes
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_reviewed
+ON scheduling.employee_shift_feedback(reviewed_at DESC) WHERE reviewed_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_action_completed
+ON scheduling.employee_shift_feedback(action_completed_at DESC) WHERE action_completed_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_pending_review
+ON scheduling.employee_shift_feedback(submitted_at)
+WHERE status IN ('SUBMITTED', 'PENDING_REVIEW');
+
+
+-- Impact and improvement indexes
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_impact
+ON scheduling.employee_shift_feedback(feedback_impact, status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_improvement
+ON scheduling.employee_shift_feedback(improvement_implemented) WHERE improvement_implemented = TRUE;
+
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_response_time
+ON scheduling.employee_shift_feedback(response_time_hours) WHERE response_time_hours IS NOT NULL;
+
+-- Department and location indexes (for organizational reporting)
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_department
+ON scheduling.employee_shift_feedback(department_id) WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_location
+ON scheduling.employee_shift_feedback(location_id) WHERE location_id IS NOT NULL;
+
+-- JSONB and array indexes (for flexible querying)
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_metadata
+ON scheduling.employee_shift_feedback USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_tags
+ON scheduling.employee_shift_feedback USING GIN(tags);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_employee_status
+ON scheduling.employee_shift_feedback(employee_id, status, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_category_status_date
+ON scheduling.employee_shift_feedback(feedback_category, status, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_department_rating
+ON scheduling.employee_shift_feedback(department_id, overall_rating DESC)
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_location_safety
+ON scheduling.employee_shift_feedback(location_id, safety_rating)
+WHERE location_id IS NOT NULL AND safety_rating IS NOT NULL;
+
+-- Partial indexes for high-priority filtering
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_critical_priority
+ON scheduling.employee_shift_feedback(feedback_id)
+WHERE priority = 1 OR feedback_impact IN ('MAJOR', 'CRITICAL');
+
+CREATE INDEX IF NOT EXISTS idx_shift_feedback_escalated
+ON scheduling.employee_shift_feedback(feedback_id)
+WHERE status = 'ESCALATED';
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_employee_shift_feedback_updated_at ON scheduling.employee_shift_feedback;
+CREATE TRIGGER trg_employee_shift_feedback_updated_at
+BEFORE UPDATE ON scheduling.employee_shift_feedback
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate feedback code
+CREATE OR REPLACE FUNCTION scheduling.generate_feedback_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_employee_code VARCHAR(20);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.feedback_code IS NULL THEN
+        -- Get employee code
+        SELECT employee_code INTO v_employee_code
+        FROM hr.employees
+        WHERE employee_id = NEW.employee_id;
+
+        -- Generate date suffix (YYYYMMDD)
+        v_date_suffix := TO_CHAR(NEW.submitted_at, 'YYYYMMDD');
+
+        -- Generate sequence number for this employee/date
+        SELECT COALESCE(MAX(CAST(SUBSTRING(feedback_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.employee_shift_feedback
+        WHERE employee_id = NEW.employee_id
+        AND submitted_at::DATE = NEW.submitted_at::DATE;
+
+        -- Format feedback code: FBK-EMP-YYYYMMDD-###
+        NEW.feedback_code := 'FBK-' || COALESCE(SUBSTRING(v_employee_code FROM 1 FOR 8), 'EMP') || '-' ||
+                            v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_employee_shift_feedback_code ON scheduling.employee_shift_feedback;
+CREATE TRIGGER trg_employee_shift_feedback_code
+BEFORE INSERT ON scheduling.employee_shift_feedback
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_feedback_code();
+
+-- Trigger to set department and location from shift
+CREATE OR REPLACE FUNCTION scheduling.set_feedback_context()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Auto-populate department_id and location_id from shift if not provided
+    IF NEW.department_id IS NULL OR NEW.location_id IS NULL THEN
+        SELECT sh.department_id, sh.location_id, sh.schedule_id
+        INTO NEW.department_id, NEW.location_id, NEW.schedule_id
+        FROM scheduling.shifts sh
+        WHERE sh.shift_id = NEW.shift_id;
+    END IF;
+
+    -- Set priority based on safety rating (safety issues get higher priority)
+    IF NEW.safety_rating IS NOT NULL AND NEW.safety_rating <= 2 THEN
+        NEW.priority := 1;
+        NEW.feedback_impact := 'CRITICAL'::scheduling.feedback_impact_enum;
+    END IF;
+
+    -- Set follow_up_required for low ratings
+    IF NEW.overall_rating <= 2 THEN
+        NEW.follow_up_required := TRUE;
+        NEW.follow_up_date := NEW.submitted_at::DATE + INTERVAL '3 days';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_employee_shift_feedback_context ON scheduling.employee_shift_feedback;
+CREATE TRIGGER trg_employee_shift_feedback_context
+BEFORE INSERT OR UPDATE OF shift_id, overall_rating, safety_rating ON scheduling.employee_shift_feedback
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.set_feedback_context();
+
+-- Trigger to track status changes
+CREATE OR REPLACE FUNCTION scheduling.track_feedback_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Log status change to metadata
+    IF OLD.status IS DISTINCT FROM NEW.status THEN
+        NEW.metadata := NEW.metadata || jsonb_build_object(
+            'status_changed_from', OLD.status::TEXT,
+            'status_changed_to', NEW.status::TEXT,
+            'status_changed_at', CURRENT_TIMESTAMP::TEXT,
+            'status_changed_by', NEW.updated_by::TEXT
+        );
+
+        -- Auto-set reviewed_at when status changes to REVIEWED or beyond
+        IF OLD.status IN ('SUBMITTED', 'PENDING_REVIEW') AND
+           NEW.status IN ('REVIEWED', 'ACTION_PLANNED', 'ACTION_IN_PROGRESS', 'ACTION_TAKEN', 'CLOSED', 'ESCALATED', 'REJECTED') AND
+           NEW.reviewed_at IS NULL THEN
+            NEW.reviewed_at := CURRENT_TIMESTAMP;
+            NEW.reviewed_by := NEW.updated_by;
+        END IF;
+
+        -- Auto-set action_completed_at when status changes to ACTION_TAKEN or CLOSED
+        IF OLD.status IN ('ACTION_PLANNED', 'ACTION_IN_PROGRESS') AND
+           NEW.status IN ('ACTION_TAKEN', 'CLOSED') AND
+           NEW.action_completed_at IS NULL THEN
+            NEW.action_completed_at := CURRENT_TIMESTAMP;
+            NEW.action_taken_by := NEW.updated_by;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_employee_shift_feedback_status_change ON scheduling.employee_shift_feedback;
+CREATE TRIGGER trg_employee_shift_feedback_status_change
+BEFORE UPDATE OF status ON scheduling.employee_shift_feedback
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.track_feedback_status_change();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.employee_shift_feedback IS
+'Captures employee feedback on shifts for continuous improvement and engagement measurement.
+Enables data-driven improvement of scheduling practices by collecting employee feedback on shift
+assignments, working conditions, and scheduling processes. Supports employee engagement and provides
+actionable insights for schedule optimization. Identifies pain points and improvement opportunities.
+Integrates with performance management and schedule optimization systems.
+KEY FEATURES:
+- Comprehensive rating system (1-5 scale) across multiple dimensions
+- Workflow management with status tracking and manager response
+- Action tracking with effectiveness measurement
+- Anonymity and privacy controls
+- Automated priority assignment based on safety ratings
+- Integration with compliance and survey systems
+- Sentiment analysis support
+KPI TARGETS:
+- Feedback submission rate: >40%
+- Average feedback rating: >4/5
+- Feedback response time: <72 hours
+- Improvement implementation rate: >60%
+- Employee satisfaction trend improvement: >10%
+- Feedback completeness rate: >85%
+- Manager action rate on feedback: >70%';
+
+-- Column comments
+COMMENT ON COLUMN scheduling.employee_shift_feedback.feedback_id IS 'Unique identifier for feedback record (UUID)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.feedback_code IS 'Business-readable feedback code (format: FBK-EMP-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.shift_id IS 'Reference to the shift being reviewed';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.employee_id IS 'Employee who submitted the feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.schedule_id IS 'Reference to parent schedule (auto-populated from shift)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.department_id IS 'Department context (auto-populated from shift)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.location_id IS 'Location context (auto-populated from shift)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.feedback_category IS 'Primary category of feedback (SHIFT_TIMING, WORKLOAD, SAFETY, etc.)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.feedback_subcategory IS 'Optional subcategory for more granular classification';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.overall_rating IS 'Overall satisfaction rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.workload_rating IS 'Workload appropriateness rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.support_rating IS 'Management support rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.equipment_rating IS 'Equipment adequacy rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.safety_rating IS 'Safety conditions rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.scheduling_rating IS 'Scheduling process rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.communication_rating IS 'Communication quality rating (1-5 scale)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.positive_aspects IS 'What went well during the shift';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.areas_for_improvement IS 'Areas identified for improvement';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.specific_issues IS 'Specific issues encountered';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.suggestions IS 'Employee suggestions for improvement';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.status IS 'Current workflow status of feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.priority IS 'Priority level (1=highest, 5=lowest)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.reviewed_by IS 'Manager who reviewed the feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.reviewed_at IS 'Timestamp when feedback was reviewed';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.review_notes IS 'Manager notes during review';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.manager_response IS 'Formal response from management';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.action_plan IS 'Planned actions to address feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.expected_resolution_date IS 'Expected date for issue resolution';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.action_taken IS 'Description of actions actually taken';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.action_taken_by IS 'Employee who completed the action';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.action_completed_at IS 'Timestamp when action was completed';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.action_effectiveness_rating IS 'Rating of action effectiveness (1-5)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.feedback_impact IS 'Assessed impact level of feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.improvement_implemented IS 'Whether improvement was actually implemented';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.improvement_impact_assessment IS 'Assessment of improvement impact';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.business_impact_score IS 'Quantified business impact score (0-100)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.is_anonymous IS 'Whether feedback is anonymous';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.allow_follow_up IS 'Whether employee allows follow-up contact';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.confidential IS 'Whether feedback is confidential';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.submitted_at IS 'Timestamp when feedback was submitted';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.submission_channel IS 'Channel used to submit feedback';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.submission_device_type IS 'Device type used for submission';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.submission_ip_address IS 'IP address from which feedback was submitted';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.follow_up_required IS 'Whether follow-up is required';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.follow_up_completed IS 'Whether follow-up was completed';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.follow_up_date IS 'Scheduled follow-up date';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.follow_up_notes IS 'Notes from follow-up';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.related_compliance_id IS 'Reference to related compliance issue';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.related_survey_id IS 'Reference to related survey';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.related_incident_id IS 'Reference to related incident';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.sentiment_score IS 'Calculated sentiment score (-1.0 to 1.0)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.urgency_score IS 'Calculated urgency score (0-10)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.response_time_hours IS 'Hours taken to respond (calculated)';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.created_by IS 'User who created the record';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.created_at IS 'Timestamp when record was created';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.updated_by IS 'User who last updated the record';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.updated_at IS 'Timestamp when record was last updated';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.metadata IS 'Flexible JSONB metadata for extensibility';
+COMMENT ON COLUMN scheduling.employee_shift_feedback.tags IS 'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+
+-- View for pending feedback requiring review
+CREATE OR REPLACE VIEW scheduling.vw_pending_feedback_review AS
+SELECT
+    feedback_id,
+    feedback_code,
+    employee_id,
+    e.first_name || ' ' || e.last_name AS employee_name,
+    shift_id,
+    feedback_category,
+    overall_rating,
+    safety_rating,
+    priority,
+    submitted_at,
+    status,
+    CASE
+        WHEN safety_rating <= 2 THEN 'CRITICAL'
+        WHEN overall_rating <= 2 THEN 'HIGH'
+        WHEN submitted_at < CURRENT_TIMESTAMP - INTERVAL '72 hours' THEN 'OVERDUE'
+        ELSE 'NORMAL'
+    END AS urgency_level,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - submitted_at)) / 3600 AS hours_pending
+FROM scheduling.employee_shift_feedback esf
+LEFT JOIN hr.employees e ON esf.employee_id = e.employee_id
+WHERE status IN ('SUBMITTED', 'PENDING_REVIEW')
+ORDER BY
+    CASE
+        WHEN safety_rating <= 2 THEN 1
+        WHEN overall_rating <= 2 THEN 2
+        WHEN submitted_at < CURRENT_TIMESTAMP - INTERVAL '72 hours' THEN 3
+        ELSE 4
+    END,
+    submitted_at ASC;
+
+COMMENT ON VIEW scheduling.vw_pending_feedback_review IS
+'View of feedback pending manager review, prioritized by safety and rating';
+
+-- View for feedback analytics by department
+CREATE OR REPLACE VIEW scheduling.vw_feedback_analytics_by_department AS
+SELECT
+    esf.department_id,  -- FIXED: Qualified with table alias
+    d.department_name,
+    COUNT(*) AS total_feedback_count,
+    ROUND(AVG(esf.overall_rating), 2) AS avg_overall_rating,
+    ROUND(AVG(esf.workload_rating), 2) AS avg_workload_rating,
+    ROUND(AVG(esf.safety_rating), 2) AS avg_safety_rating,
+    ROUND(AVG(esf.support_rating), 2) AS avg_support_rating,
+    COUNT(CASE WHEN esf.overall_rating <= 2 THEN 1 END) AS low_rating_count,
+    COUNT(CASE WHEN esf.status = 'ACTION_TAKEN' THEN 1 END) AS action_taken_count,
+    ROUND(
+        COUNT(CASE WHEN esf.status = 'ACTION_TAKEN' THEN 1 END)::NUMERIC /
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS action_rate_percentage,
+    ROUND(AVG(esf.response_time_hours), 2) AS avg_response_time_hours,
+    COUNT(CASE WHEN esf.improvement_implemented = TRUE THEN 1 END) AS improvement_count,
+    DATE_TRUNC('month', esf.submitted_at) AS feedback_month
+FROM scheduling.employee_shift_feedback esf
+LEFT JOIN hr.departments d ON esf.department_id = d.department_id
+WHERE esf.department_id IS NOT NULL  -- FIXED: Qualified with table alias
+GROUP BY esf.department_id, d.department_name, DATE_TRUNC('month', esf.submitted_at)
+ORDER BY feedback_month DESC, department_name;
+
+COMMENT ON VIEW scheduling.vw_feedback_analytics_by_department IS
+'Aggregated feedback analytics by department and month for trend analysis';
+
+
+-- script to test the view 
+SELECT 
+    department_id,
+    department_name,
+    feedback_month,
+    total_feedback_count,
+    avg_overall_rating,
+    action_rate_percentage
+FROM scheduling.vw_feedback_analytics_by_department
+WHERE feedback_month >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '3 months')
+ORDER BY feedback_month DESC, department_name
+LIMIT 10;
+
+-- View for feedback requiring follow-up
+CREATE OR REPLACE VIEW scheduling.vw_feedback_requiring_followup AS
+SELECT
+    feedback_id,
+    feedback_code,
+    employee_id,
+    feedback_category,
+    overall_rating,
+    submitted_at,
+    follow_up_date,
+    status,
+    CASE
+        WHEN follow_up_date < CURRENT_DATE THEN 'OVERDUE'
+        WHEN follow_up_date = CURRENT_DATE THEN 'DUE_TODAY'
+        ELSE 'UPCOMING'
+    END AS follow_up_status,
+    follow_up_date - CURRENT_DATE AS days_until_followup
+FROM scheduling.employee_shift_feedback
+WHERE follow_up_required = TRUE
+AND follow_up_completed = FALSE
+ORDER BY follow_up_date ASC;
+
+COMMENT ON VIEW scheduling.vw_feedback_requiring_followup IS
+'View of feedback requiring follow-up, ordered by due date';
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- -- Grant SELECT to appropriate roles based on schema security model
+-- GRANT SELECT ON scheduling.employee_shift_feedback TO reporting_role;
+-- GRANT SELECT ON scheduling.employee_shift_feedback TO manager_role;
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.employee_shift_feedback TO hr_role;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON scheduling.employee_shift_feedback TO admin_role;
+-- GRANT SELECT ON scheduling.employee_shift_feedback TO finance_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_pending_feedback_review TO manager_role, hr_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_feedback_analytics_by_department TO reporting_role, manager_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_feedback_requiring_followup TO manager_role, hr_role, admin_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema
+FROM information_schema.tables
+WHERE table_name = 'employee_shift_feedback'
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_name = 'employee_shift_feedback'
+AND table_schema = 'scheduling'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'employee_shift_feedback'
+AND schemaname = 'scheduling';
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_table = 'employee_shift_feedback'
+AND event_object_schema = 'scheduling';
+
+-- Verify enum types
+SELECT
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN ('feedback_status_enum', 'feedback_impact_enum')
+GROUP BY typname;
+
+-- Test query
+SELECT
+    feedback_code,
+    employee_id,
+    feedback_category,
+    overall_rating,
+    safety_rating,
+    status,
+    submitted_at,
+    response_time_hours
+FROM scheduling.employee_shift_feedback
+WHERE submitted_at >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY submitted_at DESC
+LIMIT 10;
+
+
+
+
+-- =============================================================================
+-- Serial No: 31 | TABLE: scheduling.schedule_notifications
+-- =============================================================================
+-- Description: Manages scheduling-related notifications and communications
+-- Business Case: Centralizes notification management for scheduling events, changes,
+--                approvals, and reminders. Supports multi-channel communication
+--                (email, SMS, push notifications) and ensures timely delivery of
+--                critical scheduling information. Reduces communication gaps and
+--                improves response times for scheduling actions. Integrates with
+--                the communication schema for consistent notification handling
+--                across the enterprise workforce management system.
+-- KPI: 1. Notification delivery rate (>95%), 2. Average delivery time (<5 minutes),
+--      3. Read/acknowledgment rate (>80%), 4. Notification relevance score (>4/5),
+--      5. Reduction in scheduling misunderstandings (>60%), 6. System notification 
+--      coverage (>90%), 7. User satisfaction with notifications (>4/5)
+-- Feature Reference: F-COMM-001, F-COMM-002, F-COMM-003, F-SCH-040, F-SCH-041
+-- Dependencies: communication.message_templates, communication.message_queues,
+--               scheduling.schedules, scheduling.shifts, hr.employees
+-- =============================================================================
+
+-- Ensure enum types exist (aligned with communication schema)
+DO $$BEGIN
+    -- Verify notification_type_enum exists in communication schema
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notification_type_enum' AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'communication')) THEN
+        RAISE NOTICE 'notification_type_enum not found in communication schema, using scheduling schema';
+    END IF;
+    
+    -- Verify channel_type_enum exists in communication schema
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'channel_type_enum' AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'communication')) THEN
+        RAISE NOTICE 'channel_type_enum not found in communication schema, using scheduling schema';
+    END IF;
+    
+    -- Verify message_status_enum exists in communication schema
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_status_enum' AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'communication')) THEN
+        RAISE NOTICE 'message_status_enum not found in communication schema, using scheduling schema';
+    END IF;
+END$$;
+
+-- Create the table with proper alignment to schema standards
+CREATE TABLE IF NOT EXISTS scheduling.schedule_notifications (
+    -- Primary identifiers
+    notification_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    notification_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (notification_code ~ '^NOT-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Notification context (aligned with scheduling schema)
+    schedule_id UUID REFERENCES scheduling.schedules(schedule_id) ON DELETE SET NULL,
+    shift_id UUID REFERENCES scheduling.shifts(shift_id) ON DELETE SET NULL,
+    employee_id UUID REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+    department_id UUID REFERENCES hr.departments(department_id) ON DELETE SET NULL,
+    location_id UUID REFERENCES operations.locations(location_id) ON DELETE SET NULL,
+    
+    -- Notification details (using communication schema enums where available)
+    notification_type VARCHAR(50) NOT NULL
+        CHECK (notification_type IN (
+            'SHIFT_ASSIGNMENT', 'SHIFT_CHANGE', 'SHIFT_CANCELLATION',
+            'SCHEDULE_PUBLISHED', 'SCHEDULE_UPDATED', 'SCHEDULE_DELETED',
+            'TIME_OFF_REQUEST', 'TIME_OFF_APPROVAL', 'TIME_OFF_REJECTION',
+            'SWAP_REQUEST', 'SWAP_APPROVAL', 'SWAP_REJECTION',
+            'OVERTIME_OFFER', 'OVERTIME_APPROVAL', 'OVERTIME_REJECTION',
+            'REMINDER', 'ALERT', 'ANNOUNCEMENT', 'FEEDBACK_REQUEST',
+            'COMPLIANCE_WARNING', 'PERFORMANCE_REVIEW', 'TRAINING_REMINDER'
+        )),
+    
+    notification_subject VARCHAR(255) NOT NULL,
+    notification_body TEXT NOT NULL,
+    notification_summary VARCHAR(500),
+    
+    -- Priority (aligned with communication.message_priority_enum pattern)
+    priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL'
+        CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT', 'CRITICAL')),
+    
+    -- Delivery channels (aligned with communication.channel_type_enum)
+    delivery_channels TEXT[] NOT NULL DEFAULT '{"EMAIL"}' 
+        CHECK (delivery_channels <@ ARRAY['EMAIL', 'SMS', 'PUSH', 'IN_APP', 'WEBHOOK', 'VOICE']::TEXT[]),
+    
+    -- Preferred channel for this notification
+    preferred_channel VARCHAR(20) DEFAULT 'EMAIL'
+        CHECK (preferred_channel IN ('EMAIL', 'SMS', 'PUSH', 'IN_APP', 'WEBHOOK', 'VOICE')),
+    
+    -- Delivery tracking (aligned with communication.message_queues pattern)
+    scheduled_for TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMP WITH TIME ZONE,
+    delivered_at TIMESTAMP WITH TIME ZONE,
+    read_at TIMESTAMP WITH TIME ZONE,
+    acknowledged_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Status tracking (aligned with communication.message_status_enum pattern)
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN (
+            'PENDING', 'QUEUED', 'PROCESSING', 'SENT', 'DELIVERED', 
+            'READ', 'ACKNOWLEDGED', 'FAILED', 'CANCELED', 'EXPIRED', 'RETRYING'
+        )),
+    
+    -- Failure tracking (aligned with communication.message_delivery_log pattern)
+    delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
+    max_delivery_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_delivery_attempts >= 1),
+    last_attempt_at TIMESTAMP WITH TIME ZONE,
+    next_retry_at TIMESTAMP WITH TIME ZONE,
+    failure_reason TEXT,
+    failure_code VARCHAR(50),
+    
+    -- Response tracking
+    response_required BOOLEAN NOT NULL DEFAULT FALSE,
+    response_received BOOLEAN NOT NULL DEFAULT FALSE,
+    response_deadline TIMESTAMP WITH TIME ZONE,
+    response_text TEXT,
+    response_action VARCHAR(50)
+        CHECK (response_action IN ('ACCEPT', 'DECLINE', 'ACKNOWLEDGE', 'DEFER', 'ESCALATE', 'OTHER')),
+    responded_at TIMESTAMP WITH TIME ZONE,
+    responded_by UUID REFERENCES hr.employees(employee_id),
+    
+    -- Template information (aligned with communication.message_templates)
+    template_id UUID REFERENCES communication.message_templates(template_id) ON DELETE SET NULL,
+    template_variables JSONB DEFAULT '{}'::jsonb,
+    template_version VARCHAR(20) DEFAULT '1.0',
+    
+    -- Localization (aligned with localization schema pattern)
+    language_code VARCHAR(10) DEFAULT 'en-US',
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    
+    -- Batch/Group tracking
+    batch_id UUID,
+    conversation_id UUID,
+    parent_notification_id UUID REFERENCES scheduling.schedule_notifications(notification_id) ON DELETE SET NULL,
+    
+    -- Business context
+    business_unit_id UUID,
+    cost_center_id UUID REFERENCES finance.cost_centers(cost_center_id) ON DELETE SET NULL,
+    project_id UUID,
+    
+    -- Compliance tracking
+    is_compliance_related BOOLEAN NOT NULL DEFAULT FALSE,
+    compliance_requirement VARCHAR(100),
+    retention_period_days INTEGER DEFAULT 365 CHECK (retention_period_days >= 0),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata (aligned with schema standards)
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_notification_delivery CHECK (
+        (status IN ('SENT', 'DELIVERED', 'READ', 'ACKNOWLEDGED') AND sent_at IS NOT NULL) OR
+        (status IN ('PENDING', 'QUEUED', 'PROCESSING', 'FAILED', 'CANCELED', 'EXPIRED', 'RETRYING') AND sent_at IS NULL)
+    ),
+    CONSTRAINT chk_delivery_sequence CHECK (
+        (delivered_at IS NULL OR delivered_at >= sent_at) AND
+        (read_at IS NULL OR read_at >= delivered_at) AND
+        (acknowledged_at IS NULL OR acknowledged_at >= read_at)
+    ),
+    CONSTRAINT chk_notification_context CHECK (
+        (schedule_id IS NOT NULL) OR
+        (shift_id IS NOT NULL) OR
+        (employee_id IS NOT NULL) OR
+        (department_id IS NOT NULL) OR
+        (location_id IS NOT NULL)
+    ),
+    CONSTRAINT chk_retry_logic CHECK (
+        (status != 'RETRYING' AND next_retry_at IS NULL) OR
+        (status = 'RETRYING' AND next_retry_at IS NOT NULL AND next_retry_at > CURRENT_TIMESTAMP)
+    ),
+    CONSTRAINT chk_response_deadline CHECK (
+        (response_required = FALSE AND response_deadline IS NULL) OR
+        (response_required = TRUE AND response_deadline IS NOT NULL AND response_deadline > scheduled_for)
+    ),
+    CONSTRAINT chk_expiration CHECK (
+        (expires_at IS NULL OR expires_at > scheduled_for)
+    )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with schema indexing strategy)
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_employee
+ON scheduling.schedule_notifications(employee_id, scheduled_for DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_shift
+ON scheduling.schedule_notifications(shift_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_schedule
+ON scheduling.schedule_notifications(schedule_id, notification_type);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_department
+ON scheduling.schedule_notifications(department_id) WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_location
+ON scheduling.schedule_notifications(location_id) WHERE location_id IS NOT NULL;
+
+-- Status and delivery indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_status
+ON scheduling.schedule_notifications(status, scheduled_for);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_pending
+ON scheduling.schedule_notifications(scheduled_for) 
+WHERE status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_failed
+ON scheduling.schedule_notifications(last_attempt_at, delivery_attempts) 
+WHERE status = 'FAILED';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_retry
+ON scheduling.schedule_notifications(next_retry_at) 
+WHERE status = 'RETRYING';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_delivery
+ON scheduling.schedule_notifications(sent_at) WHERE sent_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_expires
+ON scheduling.schedule_notifications(expires_at) 
+WHERE expires_at IS NOT NULL AND status NOT IN ('DELIVERED', 'READ', 'ACKNOWLEDGED');
+
+-- Type and priority indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_type
+ON scheduling.schedule_notifications(notification_type, priority);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_priority
+ON scheduling.schedule_notifications(priority, scheduled_for DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_critical
+ON scheduling.schedule_notifications(scheduled_for) 
+WHERE priority IN ('URGENT', 'CRITICAL') AND status = 'PENDING';
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_scheduled
+ON scheduling.schedule_notifications(scheduled_for DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_created
+ON scheduling.schedule_notifications(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_responded
+ON scheduling.schedule_notifications(responded_at) WHERE responded_at IS NOT NULL;
+
+-- Template and batch indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_template
+ON scheduling.schedule_notifications(template_id) WHERE template_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_batch
+ON scheduling.schedule_notifications(batch_id) WHERE batch_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_conversation
+ON scheduling.schedule_notifications(conversation_id) WHERE conversation_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_parent
+ON scheduling.schedule_notifications(parent_notification_id) WHERE parent_notification_id IS NOT NULL;
+
+-- Compliance and retention indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_compliance
+ON scheduling.schedule_notifications(is_compliance_related) WHERE is_compliance_related = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_retention
+ON scheduling.schedule_notifications(created_at) 
+WHERE retention_period_days IS NOT NULL;
+
+-- JSONB and array indexes (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_metadata
+ON scheduling.schedule_notifications USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_tags
+ON scheduling.schedule_notifications USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_template_vars
+ON scheduling.schedule_notifications USING GIN(template_variables);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_employee_status
+ON scheduling.schedule_notifications(employee_id, status, scheduled_for);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_type_status
+ON scheduling.schedule_notifications(notification_type, status, scheduled_for);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_priority_status
+ON scheduling.schedule_notifications(priority, status, scheduled_for);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_department_type
+ON scheduling.schedule_notifications(department_id, notification_type, scheduled_for)
+WHERE department_id IS NOT NULL;
+
+-- BRIN index for time-series data (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_time_brin
+ON scheduling.schedule_notifications USING BRIN(scheduled_for, created_at);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION (Aligned with schema standards)
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_notifications_updated_at 
+ON scheduling.schedule_notifications;
+
+CREATE TRIGGER trg_schedule_notifications_updated_at
+BEFORE UPDATE ON scheduling.schedule_notifications
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate notification code
+CREATE OR REPLACE FUNCTION scheduling.generate_notification_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_employee_code VARCHAR(20);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.notification_code IS NULL THEN
+        -- Get employee code if available
+        SELECT employee_code INTO v_employee_code
+        FROM hr.employees
+        WHERE employee_id = NEW.employee_id;
+        
+        -- Generate date suffix
+        v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+        
+        -- Generate sequence number for today
+        SELECT COALESCE(MAX(CAST(SUBSTRING(notification_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_notifications
+        WHERE notification_code LIKE 'NOT-%-' || v_date_suffix || '-%';
+        
+        -- Format notification code: NOT-EMP-YYYYMMDD-###
+        IF v_employee_code IS NOT NULL THEN
+            NEW.notification_code := 'NOT-' || SUBSTRING(v_employee_code FROM 1 FOR 3) || '-' || 
+                                     v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        ELSE
+            NEW.notification_code := 'NOT-SYS-' || v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_notifications_code 
+ON scheduling.schedule_notifications;
+
+CREATE TRIGGER trg_schedule_notifications_code
+BEFORE INSERT ON scheduling.schedule_notifications
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_notification_code();
+
+-- Trigger to validate notification workflow
+CREATE OR REPLACE FUNCTION scheduling.validate_notification_workflow()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Auto-update status based on timestamps
+    IF NEW.sent_at IS NOT NULL AND OLD.sent_at IS NULL THEN
+        NEW.status := 'SENT';
+    END IF;
+    
+    IF NEW.delivered_at IS NOT NULL AND OLD.delivered_at IS NULL THEN
+        NEW.status := 'DELIVERED';
+    END IF;
+    
+    IF NEW.read_at IS NOT NULL AND OLD.read_at IS NULL THEN
+        NEW.status := 'READ';
+    END IF;
+    
+    IF NEW.acknowledged_at IS NOT NULL AND OLD.acknowledged_at IS NULL THEN
+        NEW.status := 'ACKNOWLEDGED';
+    END IF;
+    
+    -- Auto-increment delivery attempts on retry
+    IF NEW.status = 'RETRYING' AND OLD.status = 'FAILED' THEN
+        NEW.delivery_attempts := OLD.delivery_attempts + 1;
+        NEW.last_attempt_at := CURRENT_TIMESTAMP;
+    END IF;
+    
+    -- Prevent excessive retry attempts
+    IF NEW.delivery_attempts >= NEW.max_delivery_attempts AND NEW.status = 'RETRYING' THEN
+        NEW.status := 'FAILED';
+        NEW.failure_reason := 'Maximum retry attempts exceeded';
+    END IF;
+    
+    -- Auto-expire notifications
+    IF NEW.expires_at IS NOT NULL AND NEW.expires_at < CURRENT_TIMESTAMP 
+       AND NEW.status NOT IN ('DELIVERED', 'READ', 'ACKNOWLEDGED', 'FAILED', 'CANCELED') THEN
+        NEW.status := 'EXPIRED';
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_notifications_workflow 
+ON scheduling.schedule_notifications;
+
+CREATE TRIGGER trg_schedule_notifications_workflow
+BEFORE UPDATE ON scheduling.schedule_notifications
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_notification_workflow();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION (Aligned with schema standards)
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_notifications IS 
+'Manages scheduling-related notifications and communications with delivery tracking and response management. 
+Centralizes notification management for scheduling events, changes, approvals, and reminders. Supports 
+multi-channel communication (email, SMS, push notifications) and ensures timely delivery of critical 
+scheduling information. Integrates with communication.message_templates for consistent messaging. Reduces 
+communication gaps and improves response times for scheduling actions. Provides comprehensive audit trail 
+for compliance and accountability.';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_id IS 
+'Unique identifier for the notification (UUID)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_code IS 
+'Business-readable notification code (format: NOT-XXX-YYYYMMDD-###)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.schedule_id IS 
+'Reference to the schedule this notification relates to (if applicable)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.shift_id IS 
+'Reference to the shift this notification relates to (if applicable)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.employee_id IS 
+'Reference to the employee who should receive this notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.department_id IS 
+'Reference to the department for department-wide notifications';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.location_id IS 
+'Reference to the location for location-wide notifications';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_type IS 
+'Type of notification (SHIFT_ASSIGNMENT, SHIFT_CHANGE, REMINDER, ALERT, etc.)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_subject IS 
+'Subject line for the notification (max 255 characters)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_body IS 
+'Full body content of the notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.notification_summary IS 
+'Brief summary for quick preview (max 500 characters)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.priority IS 
+'Priority level (LOW, NORMAL, HIGH, URGENT, CRITICAL)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.delivery_channels IS 
+'Array of delivery channels (EMAIL, SMS, PUSH, IN_APP, WEBHOOK, VOICE)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.preferred_channel IS 
+'Employee preferred communication channel';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.scheduled_for IS 
+'Timestamp when notification should be sent';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.sent_at IS 
+'Timestamp when notification was sent';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.delivered_at IS 
+'Timestamp when notification was delivered to recipient';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.read_at IS 
+'Timestamp when notification was read by recipient';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.acknowledged_at IS 
+'Timestamp when notification was acknowledged by recipient';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.expires_at IS 
+'Timestamp when notification expires and should no longer be displayed';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.status IS 
+'Current status in notification lifecycle (PENDING, SENT, DELIVERED, READ, etc.)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.delivery_attempts IS 
+'Number of delivery attempts made';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.max_delivery_attempts IS 
+'Maximum number of delivery attempts before marking as failed';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.last_attempt_at IS 
+'Timestamp of last delivery attempt';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.next_retry_at IS 
+'Timestamp when next retry should be attempted';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.failure_reason IS 
+'Detailed reason for delivery failure';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.failure_code IS 
+'Error code for delivery failure';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.response_required IS 
+'Indicates if recipient response is required';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.response_received IS 
+'Indicates if recipient has responded';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.response_deadline IS 
+'Deadline for recipient response';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.response_text IS 
+'Recipient response text';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.response_action IS 
+'Action taken by recipient (ACCEPT, DECLINE, ACKNOWLEDGE, etc.)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.responded_at IS 
+'Timestamp when recipient responded';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.responded_by IS 
+'Employee who responded to the notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.template_id IS 
+'Reference to notification template in communication.message_templates';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.template_variables IS 
+'JSONB variables for template personalization';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.template_version IS 
+'Version of template used for this notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.language_code IS 
+'Language code for notification content (e.g., en-US, fr-CA)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.timezone IS 
+'Timezone for scheduling and display (e.g., America/New_York)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.batch_id IS 
+'ID for batch notifications sent together';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.conversation_id IS 
+'ID for grouping related notifications in a conversation thread';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.parent_notification_id IS 
+'Reference to parent notification (for replies/threads)';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.business_unit_id IS 
+'Business unit for organizational context';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.cost_center_id IS 
+'Cost center for budget tracking';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.project_id IS 
+'Project reference for project-related notifications';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.is_compliance_related IS 
+'Indicates if notification is related to compliance requirements';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.compliance_requirement IS 
+'Specific compliance requirement this notification addresses';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.retention_period_days IS 
+'Number of days to retain this notification for compliance';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.created_by IS 
+'User who created the notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.created_at IS 
+'Timestamp when notification was created';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.updated_by IS 
+'User who last updated the notification';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.updated_at IS 
+'Timestamp when notification was last updated';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.metadata IS 
+'Flexible JSONB metadata for extensibility';
+
+COMMENT ON COLUMN scheduling.schedule_notifications.tags IS 
+'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES (Aligned with schema standards)
+-- =============================================================================
+-- View for pending notifications requiring action
+CREATE OR REPLACE VIEW scheduling.vw_pending_notifications AS
+SELECT
+    sn.notification_id,
+    sn.notification_code,
+    sn.employee_id,                              -- FIXED: Qualified with table alias
+    e.first_name || ' ' || e.last_name AS employee_name,
+    e.email AS employee_email,
+    sn.notification_type,
+    sn.notification_subject,
+    sn.priority,
+    sn.delivery_channels,
+    sn.scheduled_for,
+    sn.status,
+    sn.delivery_attempts,
+    sn.next_retry_at,
+    sn.expires_at,
+    sn.response_required,
+    sn.response_deadline,
+    sn.is_compliance_related,
+    sn.created_at
+FROM scheduling.schedule_notifications sn
+LEFT JOIN hr.employees e ON sn.employee_id = e.employee_id
+WHERE sn.status IN ('PENDING', 'QUEUED', 'RETRYING')
+AND (sn.expires_at IS NULL OR sn.expires_at > CURRENT_TIMESTAMP)
+ORDER BY 
+    CASE sn.priority                              -- FIXED: Qualified with table alias
+        WHEN 'CRITICAL' THEN 1
+        WHEN 'URGENT' THEN 2
+        WHEN 'HIGH' THEN 3
+        WHEN 'NORMAL' THEN 4
+        WHEN 'LOW' THEN 5
+    END,
+    sn.scheduled_for ASC;                         -- FIXED: Qualified with table alias
+
+COMMENT ON VIEW scheduling.vw_pending_notifications IS 
+'View of pending notifications requiring delivery or action, ordered by priority and schedule.
+Displays all notifications that are pending delivery, queued for processing, or being retried.
+Excludes expired notifications. Results ordered by priority (CRITICAL first) then by scheduled time.';
+
+-- View for notification delivery metrics
+CREATE OR REPLACE VIEW scheduling.vw_notification_delivery_metrics AS
+SELECT
+    notification_type,
+    priority,
+    COUNT(*) AS total_notifications,
+    COUNT(CASE WHEN status = 'DELIVERED' THEN 1 END) AS delivered_count,
+    COUNT(CASE WHEN status = 'READ' THEN 1 END) AS read_count,
+    COUNT(CASE WHEN status = 'ACKNOWLEDGED' THEN 1 END) AS acknowledged_count,
+    COUNT(CASE WHEN status = 'FAILED' THEN 1 END) AS failed_count,
+    ROUND(
+        COUNT(CASE WHEN status = 'DELIVERED' THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS delivery_rate_percentage,
+    ROUND(
+        COUNT(CASE WHEN status = 'READ' THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(CASE WHEN status = 'DELIVERED' THEN 1 END), 0) * 100, 2
+    ) AS read_rate_percentage,
+    ROUND(
+        COUNT(CASE WHEN status = 'ACKNOWLEDGED' THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(CASE WHEN status = 'READ' THEN 1 END), 0) * 100, 2
+    ) AS acknowledgment_rate_percentage,
+    AVG(EXTRACT(EPOCH FROM (delivered_at - scheduled_for))) AS avg_delivery_time_seconds,
+    AVG(delivery_attempts) AS avg_delivery_attempts
+FROM scheduling.schedule_notifications
+WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY notification_type, priority
+ORDER BY total_notifications DESC;
+
+COMMENT ON VIEW scheduling.vw_notification_delivery_metrics IS 
+'Aggregated notification delivery metrics for the last 30 days by type and priority';
+
+
+
+-- Test the view
+SELECT 
+    notification_code,
+    employee_name,
+    employee_email,
+    notification_type,
+    priority,
+    status,
+    scheduled_for,
+    expires_at
+FROM scheduling.vw_pending_notifications
+LIMIT 10;
+
+-- Check view dependencies
+SELECT 
+    dependent_ns.nspname AS dependent_schema,
+    dependent_view.relname AS dependent_view,
+    source_ns.nspname AS source_schema,
+    source_table.relname AS source_table
+FROM pg_depend
+JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid
+JOIN pg_class AS dependent_view ON pg_rewrite.ev_class = dependent_view.oid
+JOIN pg_class AS source_table ON pg_depend.refobjid = source_table.oid
+JOIN pg_namespace AS dependent_ns ON dependent_ns.oid = dependent_view.relnamespace
+JOIN pg_namespace AS source_ns ON source_ns.oid = source_table.relnamespace
+WHERE source_table.relname IN ('schedule_notifications', 'employees')
+ORDER BY source_table.relname;
+
+
+-- View for notifications requiring response
+CREATE OR REPLACE VIEW scheduling.vw_notifications_requiring_response AS
+SELECT
+    sn.notification_id,
+    sn.notification_code,
+    sn.employee_id,  -- FIXED: Qualified with table alias 'sn'
+    e.first_name || ' ' || e.last_name AS employee_name,
+    sn.notification_type,
+    sn.notification_subject,
+    sn.priority,
+    sn.scheduled_for,
+    sn.response_deadline,
+    EXTRACT(EPOCH FROM (sn.response_deadline - CURRENT_TIMESTAMP)) / 3600 AS hours_until_deadline,
+    CASE
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP THEN 'OVERDUE'
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP + INTERVAL '24 hours' THEN 'URGENT'
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP + INTERVAL '72 hours' THEN 'SOON'
+        ELSE 'ON_TIME'
+    END AS deadline_status,
+    sn.status,
+    sn.created_at
+FROM scheduling.schedule_notifications sn
+LEFT JOIN hr.employees e ON sn.employee_id = e.employee_id
+WHERE sn.response_required = TRUE
+AND sn.response_received = FALSE
+AND sn.status NOT IN ('CANCELED', 'EXPIRED', 'FAILED')
+ORDER BY 
+    CASE
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP THEN 1
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP + INTERVAL '24 hours' THEN 2
+        WHEN sn.response_deadline < CURRENT_TIMESTAMP + INTERVAL '72 hours' THEN 3
+        ELSE 4
+    END,
+    sn.response_deadline ASC;
+
+COMMENT ON VIEW scheduling.vw_notifications_requiring_response IS 
+'Notifications requiring employee response, ordered by deadline urgency';
+
+-- =============================================================================
+-- PERMISSION GRANTS (Aligned with schema standards)
+-- =============================================================================
+
+-- -- Grant SELECT to reporting and management roles
+-- GRANT SELECT ON scheduling.schedule_notifications TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_notifications TO manager_role;
+-- GRANT SELECT ON scheduling.schedule_notifications TO admin_role;
+-- GRANT SELECT ON scheduling.schedule_notifications TO hr_role;
+
+-- -- Grant INSERT, UPDATE to appropriate roles
+-- GRANT INSERT, UPDATE ON scheduling.schedule_notifications TO admin_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_notifications TO hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_notifications TO manager_role;
+
+-- -- Grant DELETE to admin only
+-- GRANT DELETE ON scheduling.schedule_notifications TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_pending_notifications TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_pending_notifications TO manager_role;
+-- GRANT SELECT ON scheduling.vw_pending_notifications TO admin_role;
+-- GRANT SELECT ON scheduling.vw_pending_notifications TO hr_role;
+
+-- GRANT SELECT ON scheduling.vw_notification_delivery_metrics TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_notification_delivery_metrics TO manager_role;
+-- GRANT SELECT ON scheduling.vw_notification_delivery_metrics TO admin_role;
+
+-- GRANT SELECT ON scheduling.vw_notifications_requiring_response TO manager_role;
+-- GRANT SELECT ON scheduling.vw_notifications_requiring_response TO admin_role;
+-- GRANT SELECT ON scheduling.vw_notifications_requiring_response TO hr_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name = 'schedule_notifications' 
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_notifications'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_notifications'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_notifications';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.schedule_notifications'::regclass
+ORDER BY conname;
+
+-- Test query
+SELECT 
+    notification_code,
+    employee_id,
+    notification_type,
+    notification_subject,
+    priority,
+    status,
+    scheduled_for,
+    delivery_channels
+FROM scheduling.schedule_notifications
+WHERE status = 'PENDING'
+ORDER BY scheduled_for ASC
+LIMIT 10;
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES (Aligned with schema standards)
+-- =============================================================================
+
+-- Procedure to clean up expired notifications
+CREATE OR REPLACE PROCEDURE scheduling.cleanup_expired_notifications(
+    p_days_old INTEGER DEFAULT 90,
+    p_batch_size INTEGER DEFAULT 1000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_deleted_count INTEGER;
+BEGIN
+    -- Delete expired notifications older than specified days
+    WITH deleted AS (
+        DELETE FROM scheduling.schedule_notifications
+        WHERE notification_id IN (
+            SELECT notification_id
+            FROM scheduling.schedule_notifications
+            WHERE (expires_at < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+                   OR (created_at < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+                       AND status IN ('DELIVERED', 'READ', 'ACKNOWLEDGED')))
+            AND status NOT IN ('PENDING', 'QUEUED', 'PROCESSING', 'RETRYING')
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    INSERT INTO scheduling.schedule_notifications_archive
+    SELECT * FROM deleted;
+    
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Cleaned up % expired notification records', v_deleted_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_CLEANUP',
+        'scheduling.cleanup_expired_notifications',
+        format('Cleaned up %s notification records older than %s days', v_deleted_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('deleted_count', v_deleted_count, 'days_old', p_days_old)
+    );
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Error cleaning up expired notifications: %', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.cleanup_expired_notifications IS 
+'Archives and cleans up expired notification records to maintain table performance';
+
+-- Grant execute permission
+GRANT EXECUTE ON PROCEDURE scheduling.cleanup_expired_notifications TO admin_role;
+
+
+
+-- =============================================================================
+-- Serial No: 32 | TABLE: scheduling.location_capacity
+-- =============================================================================
+-- Description: Defines and tracks capacity constraints for locations
+-- Business Case: Ensures staffing aligns with physical location capacity constraints,
+--                safety regulations, and operational requirements. Prevents overstaffing
+--                and supports optimal space utilization. Enables capacity-based scheduling
+--                and provides alerts when capacity limits are approached or exceeded.
+--                Critical for compliance with fire safety regulations, labor laws, and
+--                operational efficiency. Supports dynamic capacity management based on
+--                time periods, events, and special circumstances.
+-- KPI: 1. Capacity utilization rate (85-95%), 2. Capacity violation rate (<2%),
+--      3. Capacity planning accuracy (>90%), 4. Space utilization efficiency (>80%),
+--      5. Safety compliance rate (>99%), 6. Capacity forecast accuracy (>85%),
+--      7. Cost savings from optimal capacity utilization (>15%)
+-- Feature Reference: F-CAP-001, F-CAP-002, F-CAP-003, F-SCH-042, F-SCH-043
+-- Dependencies: operations.locations, hr.departments, hr.employees, scheduling.shifts
+-- =============================================================================
+
+-- Ensure enum type exists for capacity types (aligned with schema standards)
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'capacity_type_enum' AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'scheduling')) THEN
+    CREATE TYPE scheduling.capacity_type_enum AS ENUM (
+        'MAX_OCCUPANCY',      -- Maximum legal occupancy limit
+        'WORKSTATION_COUNT',  -- Number of workstations available
+        'EQUIPMENT_LIMIT',    -- Equipment-based capacity limit
+        'SAFETY_LIMIT',       -- Safety regulation limit
+        'OPERATIONAL_LIMIT',  -- Operational efficiency limit
+        'COMFORT_LIMIT',      -- Comfort-based recommended limit
+        'SOCIAL_DISTANCING',  -- Pandemic/social distancing limit
+        'FIRE_CODE',          -- Fire code maximum occupancy
+        'VENTILATION_LIMIT'   -- HVAC/ventilation based limit
+    );
+    RAISE NOTICE 'Created enum type: scheduling.capacity_type_enum';
+ELSE
+    RAISE NOTICE 'Enum type scheduling.capacity_type_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.capacity_type_enum IS 
+'Defines types of capacity limits for locations.
+MAX_OCCUPANCY: Maximum legal occupancy limit; WORKSTATION_COUNT: Number of workstations available;
+EQUIPMENT_LIMIT: Equipment-based capacity limit; SAFETY_LIMIT: Safety regulation limit;
+OPERATIONAL_LIMIT: Operational efficiency limit; COMFORT_LIMIT: Comfort-based recommended limit;
+SOCIAL_DISTANCING: Pandemic/social distancing limit; FIRE_CODE: Fire code maximum occupancy;
+VENTILATION_LIMIT: HVAC/ventilation based limit.';
+
+-- Create the table with proper alignment to schema standards
+CREATE TABLE IF NOT EXISTS scheduling.location_capacity (
+    -- Primary identifiers
+    capacity_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    capacity_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (capacity_code ~ '^CAP-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Location context (aligned with operations schema)
+    location_id UUID NOT NULL REFERENCES operations.locations(location_id) ON DELETE CASCADE,
+    department_id UUID REFERENCES hr.departments(department_id) ON DELETE SET NULL,
+    zone_id UUID, -- For sub-location capacity zones
+    floor_level INTEGER,
+    
+    -- Capacity definitions (using enum type)
+    capacity_type scheduling.capacity_type_enum NOT NULL DEFAULT 'MAX_OCCUPANCY',
+    
+    -- Capacity limits
+    maximum_capacity INTEGER NOT NULL CHECK (maximum_capacity >= 1),
+    optimal_capacity INTEGER CHECK (optimal_capacity >= 1 AND optimal_capacity <= maximum_capacity),
+    minimum_capacity INTEGER CHECK (minimum_capacity >= 0 AND minimum_capacity <= optimal_capacity),
+    warning_threshold INTEGER CHECK (warning_threshold >= 1 AND warning_threshold <= maximum_capacity),
+    critical_threshold INTEGER CHECK (critical_threshold >= 1 AND critical_threshold <= maximum_capacity),
+    
+    -- Time-based capacity (supports varying capacity by time)
+    effective_start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    effective_end_date DATE,
+    day_of_week INTEGER CHECK (day_of_week BETWEEN 0 AND 6), -- 0=Sunday, 6=Saturday
+    time_slot_start TIME,
+    time_slot_end TIME,
+    is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+    recurrence_pattern VARCHAR(50) CHECK (recurrence_pattern IN ('DAILY', 'WEEKLY', 'MONTHLY', 'SEASONAL', 'CUSTOM')),
+    
+    -- Capacity factors (JSONB for flexibility)
+    capacity_factors JSONB DEFAULT '{}'::jsonb,
+    adjustment_rules JSONB DEFAULT '{}'::jsonb,
+    special_conditions JSONB DEFAULT '{}'::jsonb,
+    
+    -- Status and compliance (aligned with compliance schema)
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    compliance_required BOOLEAN NOT NULL DEFAULT TRUE,
+    compliance_standard VARCHAR(100),
+    compliance_reference VARCHAR(200),
+    regulatory_body VARCHAR(100),
+    
+    -- Monitoring and alerts (aligned with communication schema)
+    monitor_capacity BOOLEAN NOT NULL DEFAULT TRUE,
+    alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    alert_threshold INTEGER CHECK (alert_threshold >= 1 AND alert_threshold <= maximum_capacity),
+    alert_recipients UUID[] DEFAULT '{}',
+    alert_channels TEXT[] DEFAULT '{"EMAIL", "IN_APP"}' 
+        CHECK (alert_channels <@ ARRAY['EMAIL', 'SMS', 'PUSH', 'IN_APP', 'WEBHOOK']::TEXT[]),
+    
+    -- Performance tracking (calculated/updated by triggers or procedures)
+    current_utilization INTEGER CHECK (current_utilization >= 0),
+    peak_utilization INTEGER CHECK (peak_utilization >= 0),
+    average_utilization NUMERIC(5,2) CHECK (average_utilization >= 0 AND average_utilization <= 100),
+    utilization_trend VARCHAR(20) CHECK (utilization_trend IN ('INCREASING', 'STABLE', 'DECREASING', 'VOLATILE')),
+    last_capacity_check TIMESTAMP WITH TIME ZONE,
+    
+    -- Integration with scheduling
+    affects_scheduling BOOLEAN NOT NULL DEFAULT TRUE,
+    enforce_in_scheduling BOOLEAN NOT NULL DEFAULT TRUE,
+    override_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    override_approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    verified_by UUID REFERENCES hr.employees(employee_id),
+    verified_at TIMESTAMP WITH TIME ZONE,
+    reviewed_by UUID REFERENCES hr.employees(employee_id),
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata (aligned with schema standards)
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_capacity_dates CHECK (
+        effective_end_date IS NULL OR effective_end_date >= effective_start_date
+    ),
+    CONSTRAINT chk_capacity_thresholds CHECK (
+        (warning_threshold IS NULL OR warning_threshold <= maximum_capacity) AND
+        (critical_threshold IS NULL OR critical_threshold <= maximum_capacity) AND
+        (critical_threshold IS NULL OR warning_threshold IS NULL OR critical_threshold >= warning_threshold)
+    ),
+    CONSTRAINT chk_capacity_ordering CHECK (
+        (minimum_capacity IS NULL OR optimal_capacity IS NULL OR minimum_capacity <= optimal_capacity) AND
+        (optimal_capacity IS NULL OR optimal_capacity <= maximum_capacity)
+    ),
+    CONSTRAINT chk_time_slots CHECK (
+        (time_slot_start IS NULL AND time_slot_end IS NULL) OR
+        (time_slot_start IS NOT NULL AND time_slot_end IS NOT NULL AND time_slot_end > time_slot_start)
+    ),
+    CONSTRAINT chk_utilization_bounds CHECK (
+        (current_utilization IS NULL OR current_utilization <= maximum_capacity) AND
+        (peak_utilization IS NULL OR peak_utilization <= maximum_capacity)
+    ),
+    CONSTRAINT chk_verification_logic CHECK (
+        (is_verified = FALSE AND verified_by IS NULL AND verified_at IS NULL) OR
+        (is_verified = TRUE AND verified_by IS NOT NULL AND verified_at IS NOT NULL)
+    )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with schema indexing strategy)
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_location
+ON scheduling.location_capacity(location_id, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_department
+ON scheduling.location_capacity(department_id) WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_type
+ON scheduling.location_capacity(capacity_type, effective_start_date);
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_dates
+ON scheduling.location_capacity(effective_start_date, effective_end_date NULLS FIRST);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_day_time
+ON scheduling.location_capacity(day_of_week, time_slot_start, time_slot_end)
+WHERE day_of_week IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_recurring
+ON scheduling.location_capacity(is_recurring) WHERE is_recurring = TRUE;
+
+-- Utilization tracking indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_utilization
+ON scheduling.location_capacity(current_utilization DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_peak
+ON scheduling.location_capacity(peak_utilization DESC) WHERE peak_utilization IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_trend
+ON scheduling.location_capacity(utilization_trend) WHERE utilization_trend IS NOT NULL;
+
+-- Status indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_active
+ON scheduling.location_capacity(is_active) WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_verified
+ON scheduling.location_capacity(is_verified) WHERE is_verified = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_monitoring
+ON scheduling.location_capacity(monitor_capacity, alert_enabled)
+WHERE monitor_capacity = TRUE AND alert_enabled = TRUE;
+
+-- Compliance indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_compliance
+ON scheduling.location_capacity(compliance_required, compliance_standard)
+WHERE compliance_required = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_regulatory
+ON scheduling.location_capacity(regulatory_body) WHERE regulatory_body IS NOT NULL;
+
+-- Scheduling integration indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_scheduling
+ON scheduling.location_capacity(affects_scheduling, enforce_in_scheduling)
+WHERE affects_scheduling = TRUE AND enforce_in_scheduling = TRUE;
+
+-- Alert configuration indexes
+CREATE INDEX IF NOT EXISTS idx_location_capacity_alerts
+ON scheduling.location_capacity(alert_threshold, alert_enabled)
+WHERE alert_enabled = TRUE;
+
+-- JSONB and array indexes (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_location_capacity_factors
+ON scheduling.location_capacity USING GIN(capacity_factors);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_rules
+ON scheduling.location_capacity USING GIN(adjustment_rules);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_conditions
+ON scheduling.location_capacity USING GIN(special_conditions);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_metadata
+ON scheduling.location_capacity USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_tags
+ON scheduling.location_capacity USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_recipients
+ON scheduling.location_capacity USING GIN(alert_recipients);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_location_capacity_location_type_date
+ON scheduling.location_capacity(location_id, capacity_type, effective_start_date, effective_end_date);
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_active_dates
+ON scheduling.location_capacity(location_id, is_active, effective_start_date, effective_end_date)
+WHERE is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_location_capacity_utilization_status
+ON scheduling.location_capacity(location_id, current_utilization, is_active)
+WHERE is_active = TRUE AND monitor_capacity = TRUE;
+
+-- BRIN index for time-series data (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_location_capacity_time_brin
+ON scheduling.location_capacity USING BRIN(effective_start_date, created_at);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION (Aligned with schema standards)
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_location_capacity_updated_at 
+ON scheduling.location_capacity;
+
+CREATE TRIGGER trg_location_capacity_updated_at
+BEFORE UPDATE ON scheduling.location_capacity
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate capacity code
+CREATE OR REPLACE FUNCTION scheduling.generate_capacity_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_location_code VARCHAR(20);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.capacity_code IS NULL THEN
+        -- Get location code if available
+        SELECT location_code INTO v_location_code
+        FROM operations.locations
+        WHERE location_id = NEW.location_id;
+        
+        -- Generate date suffix
+        v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+        
+        -- Generate sequence number for today
+        SELECT COALESCE(MAX(CAST(SUBSTRING(capacity_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.location_capacity
+        WHERE capacity_code LIKE 'CAP-%-' || v_date_suffix || '-%';
+        
+        -- Format capacity code: CAP-LOC-YYYYMMDD-###
+        IF v_location_code IS NOT NULL THEN
+            NEW.capacity_code := 'CAP-' || SUBSTRING(v_location_code FROM 1 FOR 3) || '-' || 
+                                 v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        ELSE
+            NEW.capacity_code := 'CAP-LOC-' || v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_location_capacity_code 
+ON scheduling.location_capacity;
+
+CREATE TRIGGER trg_location_capacity_code
+BEFORE INSERT ON scheduling.location_capacity
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_capacity_code();
+
+-- Trigger to validate capacity thresholds
+CREATE OR REPLACE FUNCTION scheduling.validate_capacity_thresholds()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Ensure thresholds are in proper order
+    IF NEW.critical_threshold IS NOT NULL AND NEW.warning_threshold IS NOT NULL THEN
+        IF NEW.critical_threshold < NEW.warning_threshold THEN
+            RAISE EXCEPTION 'Critical threshold must be >= warning threshold';
+        END IF;
+    END IF;
+    
+    -- Ensure capacity ordering is correct
+    IF NEW.minimum_capacity IS NOT NULL AND NEW.optimal_capacity IS NOT NULL THEN
+        IF NEW.minimum_capacity > NEW.optimal_capacity THEN
+            RAISE EXCEPTION 'Minimum capacity must be <= optimal capacity';
+        END IF;
+    END IF;
+    
+    IF NEW.optimal_capacity IS NOT NULL AND NEW.maximum_capacity IS NOT NULL THEN
+        IF NEW.optimal_capacity > NEW.maximum_capacity THEN
+            RAISE EXCEPTION 'Optimal capacity must be <= maximum capacity';
+        END IF;
+    END IF;
+    
+    -- Auto-set warning threshold if not provided
+    IF NEW.warning_threshold IS NULL AND NEW.maximum_capacity IS NOT NULL THEN
+        NEW.warning_threshold := CEIL(NEW.maximum_capacity * 0.9);
+    END IF;
+    
+    -- Auto-set critical threshold if not provided
+    IF NEW.critical_threshold IS NULL AND NEW.maximum_capacity IS NOT NULL THEN
+        NEW.critical_threshold := NEW.maximum_capacity;
+    END IF;
+    
+    -- Auto-set optimal capacity if not provided
+    IF NEW.optimal_capacity IS NULL AND NEW.maximum_capacity IS NOT NULL THEN
+        NEW.optimal_capacity := CEIL(NEW.maximum_capacity * 0.85);
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_location_capacity_thresholds 
+ON scheduling.location_capacity;
+
+CREATE TRIGGER trg_location_capacity_thresholds
+BEFORE INSERT OR UPDATE OF minimum_capacity, optimal_capacity, maximum_capacity, 
+                          warning_threshold, critical_threshold
+ON scheduling.location_capacity
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_capacity_thresholds();
+
+-- Trigger to track capacity verification
+CREATE OR REPLACE FUNCTION scheduling.track_capacity_verification()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Auto-set verification fields when is_verified changes
+    IF NEW.is_verified = TRUE AND OLD.is_verified = FALSE THEN
+        NEW.verified_by := NEW.updated_by;
+        NEW.verified_at := CURRENT_TIMESTAMP;
+    ELSIF NEW.is_verified = FALSE AND OLD.is_verified = TRUE THEN
+        NEW.verified_by := NULL;
+        NEW.verified_at := NULL;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_location_capacity_verification 
+ON scheduling.location_capacity;
+
+CREATE TRIGGER trg_location_capacity_verification
+BEFORE UPDATE OF is_verified ON scheduling.location_capacity
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.track_capacity_verification();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION (Aligned with schema standards)
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.location_capacity IS 
+'Defines and tracks capacity constraints for locations to ensure optimal staffing and space utilization.
+Ensures staffing aligns with physical location capacity constraints, safety regulations, and operational requirements.
+Prevents overstaffing and supports optimal space utilization. Enables capacity-based scheduling and provides alerts
+when capacity limits are approached or exceeded. Critical for compliance with fire safety regulations, labor laws,
+and operational efficiency. Supports dynamic capacity management based on time periods, events, and special circumstances.';
+
+COMMENT ON COLUMN scheduling.location_capacity.capacity_id IS 
+'Unique identifier for the capacity record (UUID)';
+
+COMMENT ON COLUMN scheduling.location_capacity.capacity_code IS 
+'Business-readable capacity code (format: CAP-XXX-YYYYMMDD-###)';
+
+COMMENT ON COLUMN scheduling.location_capacity.location_id IS 
+'Reference to the location this capacity applies to';
+
+COMMENT ON COLUMN scheduling.location_capacity.department_id IS 
+'Reference to department (if capacity is department-specific)';
+
+COMMENT ON COLUMN scheduling.location_capacity.zone_id IS 
+'Reference to sub-location zone for granular capacity management';
+
+COMMENT ON COLUMN scheduling.location_capacity.floor_level IS 
+'Floor level for multi-story locations';
+
+COMMENT ON COLUMN scheduling.location_capacity.capacity_type IS 
+'Type of capacity limit (MAX_OCCUPANCY, WORKSTATION_COUNT, SAFETY_LIMIT, etc.)';
+
+COMMENT ON COLUMN scheduling.location_capacity.maximum_capacity IS 
+'Absolute maximum capacity limit (hard constraint)';
+
+COMMENT ON COLUMN scheduling.location_capacity.optimal_capacity IS 
+'Recommended optimal capacity for efficient operations';
+
+COMMENT ON COLUMN scheduling.location_capacity.minimum_capacity IS 
+'Minimum capacity required for operations';
+
+COMMENT ON COLUMN scheduling.location_capacity.warning_threshold IS 
+'Capacity level at which warnings are triggered';
+
+COMMENT ON COLUMN scheduling.location_capacity.critical_threshold IS 
+'Capacity level at which critical alerts are triggered';
+
+COMMENT ON COLUMN scheduling.location_capacity.effective_start_date IS 
+'Date when capacity limit becomes effective';
+
+COMMENT ON COLUMN scheduling.location_capacity.effective_end_date IS 
+'Date when capacity limit expires (NULL = indefinite)';
+
+COMMENT ON COLUMN scheduling.location_capacity.day_of_week IS 
+'Day of week for time-based capacity (0=Sunday, 6=Saturday)';
+
+COMMENT ON COLUMN scheduling.location_capacity.time_slot_start IS 
+'Start time for time-based capacity limits';
+
+COMMENT ON COLUMN scheduling.location_capacity.time_slot_end IS 
+'End time for time-based capacity limits';
+
+COMMENT ON COLUMN scheduling.location_capacity.is_recurring IS 
+'Indicates if capacity limit recurs (daily, weekly, etc.)';
+
+COMMENT ON COLUMN scheduling.location_capacity.capacity_factors IS 
+'JSONB factors affecting capacity (weather, events, etc.)';
+
+COMMENT ON COLUMN scheduling.location_capacity.adjustment_rules IS 
+'JSONB rules for automatic capacity adjustments';
+
+COMMENT ON COLUMN scheduling.location_capacity.special_conditions IS 
+'JSONB special conditions affecting capacity';
+
+COMMENT ON COLUMN scheduling.location_capacity.is_active IS 
+'Indicates if capacity limit is currently active';
+
+COMMENT ON COLUMN scheduling.location_capacity.is_verified IS 
+'Indicates if capacity limit has been verified';
+
+COMMENT ON COLUMN scheduling.location_capacity.compliance_required IS 
+'Indicates if capacity is required for compliance';
+
+COMMENT ON COLUMN scheduling.location_capacity.compliance_standard IS 
+'Name of compliance standard (e.g., OSHA, Fire Code)';
+
+COMMENT ON COLUMN scheduling.location_capacity.compliance_reference IS 
+'Reference code for compliance standard';
+
+COMMENT ON COLUMN scheduling.location_capacity.regulatory_body IS 
+'Regulatory body enforcing the capacity limit';
+
+COMMENT ON COLUMN scheduling.location_capacity.monitor_capacity IS 
+'Indicates if capacity should be actively monitored';
+
+COMMENT ON COLUMN scheduling.location_capacity.alert_enabled IS 
+'Indicates if alerts are enabled for this capacity';
+
+COMMENT ON COLUMN scheduling.location_capacity.alert_threshold IS 
+'Capacity level at which alerts are triggered';
+
+COMMENT ON COLUMN scheduling.location_capacity.alert_recipients IS 
+'Array of employee IDs to receive alerts';
+
+COMMENT ON COLUMN scheduling.location_capacity.alert_channels IS 
+'Array of alert channels (EMAIL, SMS, PUSH, IN_APP, WEBHOOK)';
+
+COMMENT ON COLUMN scheduling.location_capacity.current_utilization IS 
+'Current number of people/stations in use';
+
+COMMENT ON COLUMN scheduling.location_capacity.peak_utilization IS 
+'Peak utilization recorded';
+
+COMMENT ON COLUMN scheduling.location_capacity.average_utilization IS 
+'Average utilization percentage (0-100)';
+
+COMMENT ON COLUMN scheduling.location_capacity.utilization_trend IS 
+'Trend direction (INCREASING, STABLE, DECREASING, VOLATILE)';
+
+COMMENT ON COLUMN scheduling.location_capacity.last_capacity_check IS 
+'Timestamp of last capacity verification';
+
+COMMENT ON COLUMN scheduling.location_capacity.affects_scheduling IS 
+'Indicates if capacity affects schedule generation';
+
+COMMENT ON COLUMN scheduling.location_capacity.enforce_in_scheduling IS 
+'Indicates if capacity is enforced during scheduling';
+
+COMMENT ON COLUMN scheduling.location_capacity.override_allowed IS 
+'Indicates if capacity can be overridden';
+
+COMMENT ON COLUMN scheduling.location_capacity.override_approval_required IS 
+'Indicates if override requires approval';
+
+COMMENT ON COLUMN scheduling.location_capacity.created_by IS 
+'User who created the capacity record';
+
+COMMENT ON COLUMN scheduling.location_capacity.created_at IS 
+'Timestamp when record was created';
+
+COMMENT ON COLUMN scheduling.location_capacity.updated_by IS 
+'User who last updated the record';
+
+COMMENT ON COLUMN scheduling.location_capacity.updated_at IS 
+'Timestamp when record was last updated';
+
+COMMENT ON COLUMN scheduling.location_capacity.verified_by IS 
+'User who verified the capacity limit';
+
+COMMENT ON COLUMN scheduling.location_capacity.verified_at IS 
+'Timestamp when capacity was verified';
+
+COMMENT ON COLUMN scheduling.location_capacity.reviewed_by IS 
+'User who last reviewed the capacity limit';
+
+COMMENT ON COLUMN scheduling.location_capacity.reviewed_at IS 
+'Timestamp of last review';
+
+COMMENT ON COLUMN scheduling.location_capacity.metadata IS 
+'Flexible JSONB metadata for extensibility';
+
+COMMENT ON COLUMN scheduling.location_capacity.tags IS 
+'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- View for current capacity status
+CREATE OR REPLACE VIEW scheduling.vw_current_capacity_status AS
+SELECT
+    lc.capacity_id,
+    lc.capacity_code,
+    lc.location_id,
+    l.location_name,
+    l.location_code,
+    lc.department_id,
+    d.department_name,
+    lc.capacity_type,
+    lc.maximum_capacity,
+    lc.optimal_capacity,
+    lc.current_utilization,
+    ROUND((COALESCE(lc.current_utilization, 0)::NUMERIC / lc.maximum_capacity * 100), 2) AS utilization_percentage,
+    lc.warning_threshold,
+    lc.critical_threshold,
+    CASE
+        WHEN lc.current_utilization IS NULL THEN 'UNKNOWN'
+        WHEN lc.current_utilization >= lc.critical_threshold THEN 'CRITICAL'
+        WHEN lc.current_utilization >= lc.warning_threshold THEN 'WARNING'
+        WHEN lc.current_utilization >= lc.optimal_capacity THEN 'OPTIMAL'
+        ELSE 'NORMAL'
+    END AS capacity_status,
+    lc.utilization_trend,
+    lc.is_active,
+    lc.is_verified,
+    lc.compliance_required,
+    lc.compliance_standard,
+    lc.last_capacity_check,
+    lc.effective_start_date,
+    lc.effective_end_date,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.location_capacity lc
+LEFT JOIN operations.locations l ON lc.location_id = l.location_id
+LEFT JOIN hr.departments d ON lc.department_id = d.department_id
+WHERE lc.is_active = TRUE
+AND (lc.effective_end_date IS NULL OR lc.effective_end_date >= CURRENT_DATE)
+ORDER BY 
+    CASE
+        WHEN lc.current_utilization >= lc.critical_threshold THEN 1
+        WHEN lc.current_utilization >= lc.warning_threshold THEN 2
+        ELSE 3
+    END,
+    utilization_percentage DESC;
+
+COMMENT ON VIEW scheduling.vw_current_capacity_status IS 
+'Current capacity status for all active locations with utilization percentages and status indicators';
+
+-- View for capacity violations
+CREATE OR REPLACE VIEW scheduling.vw_capacity_violations AS
+SELECT
+    lc.capacity_id,
+    lc.capacity_code,
+    lc.location_id,
+    l.location_name,
+    lc.capacity_type,
+    lc.maximum_capacity,
+    lc.current_utilization,
+    lc.current_utilization - lc.maximum_capacity AS over_capacity_by,
+    ROUND((lc.current_utilization::NUMERIC / lc.maximum_capacity * 100), 2) AS utilization_percentage,
+    lc.compliance_standard,
+    lc.regulatory_body,
+    lc.last_capacity_check,
+    lc.created_at,
+    'CAPACITY_EXCEEDED' AS violation_type,
+    CASE
+        WHEN lc.current_utilization > lc.maximum_capacity * 1.2 THEN 'CRITICAL'
+        WHEN lc.current_utilization > lc.maximum_capacity THEN 'HIGH'
+        ELSE 'MEDIUM'
+    END AS violation_severity
+FROM scheduling.location_capacity lc
+LEFT JOIN operations.locations l ON lc.location_id = l.location_id
+WHERE lc.is_active = TRUE
+AND lc.current_utilization IS NOT NULL
+AND lc.current_utilization > lc.maximum_capacity
+ORDER BY utilization_percentage DESC;
+
+COMMENT ON VIEW scheduling.vw_capacity_violations IS 
+'Active capacity violations showing locations exceeding maximum capacity limits';
+
+-- View for capacity planning
+CREATE OR REPLACE VIEW scheduling.vw_capacity_planning AS
+SELECT
+    lc.location_id,
+    l.location_name,
+    l.city,
+    l.region,
+    COUNT(*) AS total_capacity_records,
+    MAX(lc.maximum_capacity) AS max_total_capacity,
+    SUM(lc.maximum_capacity) FILTER (WHERE lc.capacity_type = 'WORKSTATION_COUNT') AS total_workstations,
+    AVG(lc.average_utilization) AS avg_utilization_percentage,
+    MAX(lc.peak_utilization) AS peak_utilization,
+    COUNT(*) FILTER (WHERE lc.current_utilization > lc.warning_threshold) AS locations_at_warning,
+    COUNT(*) FILTER (WHERE lc.current_utilization > lc.critical_threshold) AS locations_at_critical,
+    COUNT(*) FILTER (WHERE lc.compliance_required = TRUE) AS compliance_required_count,
+    COUNT(*) FILTER (WHERE lc.is_verified = FALSE) AS unverified_count
+FROM scheduling.location_capacity lc
+LEFT JOIN operations.locations l ON lc.location_id = l.location_id
+WHERE lc.is_active = TRUE
+AND (lc.effective_end_date IS NULL OR lc.effective_end_date >= CURRENT_DATE)
+GROUP BY lc.location_id, l.location_name, l.city, l.region
+ORDER BY max_total_capacity DESC;
+
+COMMENT ON VIEW scheduling.vw_capacity_planning IS 
+'Capacity planning summary by location for workforce planning and compliance monitoring';
+
+-- =============================================================================
+-- PERMISSION GRANTS (Aligned with schema standards)
+-- =============================================================================
+
+-- -- Grant SELECT to reporting and management roles
+-- GRANT SELECT ON scheduling.location_capacity TO reporting_role;
+-- GRANT SELECT ON scheduling.location_capacity TO manager_role;
+-- GRANT SELECT ON scheduling.location_capacity TO admin_role;
+-- GRANT SELECT ON scheduling.location_capacity TO hr_role;
+-- GRANT SELECT ON scheduling.location_capacity TO compliance_role;
+
+-- -- Grant INSERT, UPDATE to appropriate roles
+-- GRANT INSERT, UPDATE ON scheduling.location_capacity TO admin_role;
+-- GRANT INSERT, UPDATE ON scheduling.location_capacity TO hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.location_capacity TO manager_role;
+
+-- -- Grant DELETE to admin only
+-- GRANT DELETE ON scheduling.location_capacity TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_current_capacity_status TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_current_capacity_status TO manager_role;
+-- GRANT SELECT ON scheduling.vw_current_capacity_status TO admin_role;
+
+-- GRANT SELECT ON scheduling.vw_capacity_violations TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_capacity_violations TO manager_role;
+-- GRANT SELECT ON scheduling.vw_capacity_violations TO admin_role;
+-- GRANT SELECT ON scheduling.vw_capacity_violations TO compliance_role;
+
+-- GRANT SELECT ON scheduling.vw_capacity_planning TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_capacity_planning TO manager_role;
+-- GRANT SELECT ON scheduling.vw_capacity_planning TO admin_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name = 'location_capacity' 
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'location_capacity'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'location_capacity'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'location_capacity';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.location_capacity'::regclass
+ORDER BY conname;
+
+-- Verify enum type
+SELECT typname, pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname = 'capacity_type_enum'
+GROUP BY typname;
+
+-- Test query
+SELECT 
+    capacity_code,
+    location_id,
+    capacity_type,
+    maximum_capacity,
+    current_utilization,
+    utilization_trend,
+    is_active,
+    is_verified
+FROM scheduling.location_capacity
+WHERE is_active = TRUE
+ORDER BY current_utilization DESC NULLS LAST
+LIMIT 10;
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES (Aligned with schema standards)
+-- =============================================================================
+
+-- Procedure to update capacity utilization
+CREATE OR REPLACE PROCEDURE scheduling.update_capacity_utilization(
+    p_location_id UUID,
+    p_current_count INTEGER,
+    p_updated_by UUID DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_capacity_record RECORD;
+    v_utilization_percentage NUMERIC(5,2);
+    v_alert_needed BOOLEAN := FALSE;
+    v_alert_message TEXT;
+BEGIN
+    -- Update capacity records for the location
+    FOR v_capacity_record IN
+        SELECT * FROM scheduling.location_capacity
+        WHERE location_id = p_location_id
+        AND is_active = TRUE
+        AND (effective_end_date IS NULL OR effective_end_date >= CURRENT_DATE)
+        FOR UPDATE
+    LOOP
+        -- Calculate utilization percentage
+        v_utilization_percentage := (p_current_count::NUMERIC / v_capacity_record.maximum_capacity * 100);
+        
+        -- Update capacity record
+        UPDATE scheduling.location_capacity
+        SET 
+            current_utilization = p_current_count,
+            average_utilization = COALESCE(average_utilization, 0) * 0.9 + v_utilization_percentage * 0.1,
+            utilization_trend = CASE
+                WHEN p_current_count > COALESCE(current_utilization, 0) THEN 'INCREASING'
+                WHEN p_current_count < COALESCE(current_utilization, 0) THEN 'DECREASING'
+                ELSE 'STABLE'
+            END,
+            last_capacity_check = CURRENT_TIMESTAMP,
+            updated_by = COALESCE(p_updated_by, updated_by),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE capacity_id = v_capacity_record.capacity_id;
+        
+        -- Check if alert is needed
+        IF v_capacity_record.alert_enabled = TRUE THEN
+            IF p_current_count >= v_capacity_record.critical_threshold THEN
+                v_alert_needed := TRUE;
+                v_alert_message := format('CRITICAL: Location %s capacity exceeded (%s/%s)',
+                    v_capacity_record.capacity_code, p_current_count, v_capacity_record.maximum_capacity);
+            ELSIF p_current_count >= v_capacity_record.warning_threshold THEN
+                v_alert_needed := TRUE;
+                v_alert_message := format('WARNING: Location %s approaching capacity (%s/%s)',
+                    v_capacity_record.capacity_code, p_current_count, v_capacity_record.maximum_capacity);
+            END IF;
+        END IF;
+        
+        -- Send alert if needed (would integrate with communication schema)
+        IF v_alert_needed THEN
+            RAISE NOTICE 'Alert: %', v_alert_message;
+            -- INSERT INTO communication.message_queues (...) VALUES (...);
+        END IF;
+    END LOOP;
+    
+    -- Log the update
+    INSERT INTO system.audit_logs (
+        user_id,
+        action,
+        entity_type,
+        entity_id,
+        new_state,
+        created_by
+    ) VALUES (
+        COALESCE(p_updated_by, '00000000-0000-0000-0000-000000000000'::UUID),
+        'CAPACITY_UPDATE',
+        'scheduling.location_capacity',
+        p_location_id,
+        jsonb_build_object('current_count', p_current_count),
+        COALESCE(p_updated_by, '00000000-0000-0000-0000-000000000000'::UUID)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.update_capacity_utilization IS 
+'Updates capacity utilization for a location and triggers alerts if thresholds are exceeded';
+
+-- -- Grant execute permission
+-- GRANT EXECUTE ON PROCEDURE scheduling.update_capacity_utilization TO admin_role;
+-- GRANT EXECUTE ON PROCEDURE scheduling.update_capacity_utilization TO manager_role;
+
+-- Procedure to verify capacity limits
+CREATE OR REPLACE PROCEDURE scheduling.verify_capacity_limits(
+    p_days_old INTEGER DEFAULT 365,
+    p_updated_by UUID DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_verified_count INTEGER := 0;
+BEGIN
+    -- Mark old capacity records for review
+    UPDATE scheduling.location_capacity
+    SET 
+        is_verified = FALSE,
+        reviewed_by = COALESCE(p_updated_by, reviewed_by),
+        reviewed_at = CURRENT_TIMESTAMP,
+        updated_by = COALESCE(p_updated_by, updated_by),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE is_verified = TRUE
+    AND verified_at < CURRENT_DATE - (p_days_old || ' days')::INTERVAL
+    AND is_active = TRUE;
+    
+    GET DIAGNOSTICS v_verified_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Marked % capacity records for re-verification', v_verified_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'CAPACITY_VERIFICATION',
+        'scheduling.verify_capacity_limits',
+        format('Marked %s capacity records for re-verification', v_verified_count),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('verified_count', v_verified_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.verify_capacity_limits IS 
+'Marks old capacity records for re-verification to ensure accuracy';
+
+-- -- Grant execute permission
+-- GRANT EXECUTE ON PROCEDURE scheduling.verify_capacity_limits TO admin_role;
+-- GRANT EXECUTE ON PROCEDURE scheduling.verify_capacity_limits TO compliance_role;
+
+-- =============================================================================
+-- Serial No: 33 | TABLE: scheduling.skill_certification_tracking
+-- =============================================================================
+-- Description: Tracks employee skills, certifications, and training requirements
+-- Business Case: Ensures employees are properly qualified for assigned shifts by
+--                tracking skills, certifications, and training requirements. Supports
+--                compliance with regulatory requirements and quality standards.
+--                Enables skill-based scheduling and identifies training gaps.
+-- KPI: 1. Certification compliance rate (>98%), 2. Training completion rate (>95%),
+--      3. Skill match accuracy (>90%), 4. Certification renewal rate (>99%),
+--      5. Training effectiveness score (>4/5), 6. Regulatory audit success rate (>99%),
+--      7. Employee skill development rate (>20% annually)
+-- Feature Reference: F-SKILL-001, F-SKILL-002, F-CERT-001, F-CERT-002, F-COMP-001
+-- Dependencies: hr.employees, hr.skills, hr.certification_types, hr.employee_certifications,
+--               hr.employee_skills, scheduling.shifts
+-- =============================================================================
+
+-- Ensure enum types exist (aligned with schema standards)
+DO $$BEGIN
+-- Skill certification status enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'skill_certification_status_enum') THEN
+CREATE TYPE scheduling.skill_certification_status_enum AS ENUM (
+'ACTIVE',             -- Certification/skill is currently valid
+'EXPIRED',            -- Certification/skill has expired
+'SUSPENDED',          -- Temporarily suspended
+'REVOKED',            -- Permanently revoked
+'RENEWAL_PENDING',    -- Renewal in progress
+'UNDER_REVIEW',       -- Under verification review
+'GRACE_PERIOD'        -- Within grace period after expiry
+);
+RAISE NOTICE 'Created enum type: scheduling.skill_certification_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.skill_certification_status_enum already exists';
+END IF;
+
+-- Proficiency level enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'proficiency_level_enum') THEN
+CREATE TYPE scheduling.proficiency_level_enum AS ENUM (
+'BEGINNER',     -- Basic understanding
+'INTERMEDIATE', -- Competent application
+'ADVANCED',     -- Proficient application
+'EXPERT',       -- Mastery level
+'MASTER'        -- Industry recognized expert
+);
+RAISE NOTICE 'Created enum type: scheduling.proficiency_level_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.proficiency_level_enum already exists';
+END IF;
+
+-- Compliance status enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'certification_compliance_status_enum') THEN
+CREATE TYPE scheduling.certification_compliance_status_enum AS ENUM (
+'COMPLIANT',      -- Meets all requirements
+'NON_COMPLIANT',  -- Does not meet requirements
+'AT_RISK',        -- May become non-compliant soon
+'GRACE_PERIOD',   -- Within allowed grace period
+'EXEMPT'          -- Exempt from requirement
+);
+RAISE NOTICE 'Created enum type: scheduling.certification_compliance_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.certification_compliance_status_enum already exists';
+END IF;
+
+-- Verification method enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'verification_method_enum') THEN
+CREATE TYPE scheduling.verification_method_enum AS ENUM (
+'TEST',               -- Written or practical test
+'MANAGER_APPROVAL',   -- Manager verification
+'TRAINING_COMPLETION',-- Training course completion
+'EXTERNAL_CERTIFICATION', -- External certifying body
+'PORTFOLIO_REVIEW',   -- Work portfolio assessment
+'PEER_REVIEW',        -- Peer verification
+'ON_JOB_OBSERVATION'  -- On-job performance observation
+);
+RAISE NOTICE 'Created enum type: scheduling.verification_method_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.verification_method_enum already exists';
+END IF;
+
+-- Renewal frequency enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'renewal_frequency_enum') THEN
+CREATE TYPE scheduling.renewal_frequency_enum AS ENUM (
+'MONTHLY',
+'QUARTERLY',
+'BIANNUAL',
+'ANNUAL',
+'BIENNIAL',
+'TRIENNIAL',
+'LIFETIME'
+);
+RAISE NOTICE 'Created enum type: scheduling.renewal_frequency_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.renewal_frequency_enum already exists';
+END IF;
+END$$;
+
+-- Create the table with proper alignment to schema standards
+-- FIX: days_until_expiry is now a regular column (not GENERATED) to avoid immutability error
+CREATE TABLE IF NOT EXISTS scheduling.skill_certification_tracking (
+-- Primary identifiers
+tracking_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+tracking_code VARCHAR(50) UNIQUE NOT NULL
+CHECK (tracking_code ~ '^SCT-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+-- Employee and skill context (aligned with hr schema)
+employee_id UUID NOT NULL REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+skill_id UUID NOT NULL REFERENCES hr.skills(skill_id) ON DELETE CASCADE,
+certification_type_id UUID REFERENCES hr.certification_types(certification_type_id) ON DELETE SET NULL,
+employee_certification_id UUID REFERENCES hr.employee_certifications(certification_id) ON DELETE SET NULL,
+employee_skill_id UUID REFERENCES hr.employee_skills(employee_skill_id) ON DELETE SET NULL,
+
+-- Status and validity (using enum types)
+status scheduling.skill_certification_status_enum NOT NULL DEFAULT 'ACTIVE',
+is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+verification_method scheduling.verification_method_enum,
+
+-- Dates and validity
+obtained_date DATE NOT NULL,
+valid_from DATE NOT NULL DEFAULT CURRENT_DATE,
+valid_to DATE,
+-- FIX: Changed from GENERATED ALWAYS AS to regular column (will be updated by trigger)
+days_until_expiry INTEGER,
+renewal_required BOOLEAN NOT NULL DEFAULT FALSE,
+renewal_frequency scheduling.renewal_frequency_enum,
+last_renewal_date DATE,
+next_renewal_date DATE,
+
+-- Training details
+training_provider VARCHAR(200),
+training_provider_type VARCHAR(50)
+CHECK (training_provider_type IN ('INTERNAL', 'EXTERNAL', 'VENDOR', 'ACADEMIC', 'CERTIFYING_BODY')),
+training_duration_hours NUMERIC(6,2) CHECK (training_duration_hours >= 0),
+training_score NUMERIC(5,2) CHECK (training_score BETWEEN 0 AND 100),
+training_certificate_url TEXT,
+training_completion_date DATE,
+
+-- Assessment details
+assessment_score NUMERIC(5,2) CHECK (assessment_score BETWEEN 0 AND 100),
+assessor_id UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+assessed_at TIMESTAMP WITH TIME ZONE,
+assessment_method VARCHAR(50)
+CHECK (assessment_method IN ('WRITTEN_TEST', 'PRACTICAL_TEST', 'ORAL_EXAM',
+'OBSERVATION', 'PORTFOLIO', 'SIMULATION', 'ON_JOB')),
+assessment_notes TEXT,
+
+-- Proficiency levels (using enum type)
+proficiency_level scheduling.proficiency_level_enum,
+proficiency_score NUMERIC(5,2) CHECK (proficiency_score BETWEEN 0 AND 100),
+last_used_date DATE,
+usage_count INTEGER DEFAULT 0 CHECK (usage_count >= 0),
+
+-- Renewal tracking
+renewal_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE,
+renewal_reminder_date DATE,
+renewal_reminder_count INTEGER DEFAULT 0 CHECK (renewal_reminder_count >= 0),
+renewal_submitted BOOLEAN NOT NULL DEFAULT FALSE,
+renewal_submitted_date DATE,
+renewal_approved_date DATE,
+renewal_rejected_date DATE,
+renewal_rejection_reason TEXT,
+
+-- Compliance tracking (using enum type)
+compliance_status scheduling.certification_compliance_status_enum DEFAULT 'COMPLIANT',
+compliance_notes TEXT,
+compliance_requirement_id UUID,
+regulatory_body VARCHAR(100),
+regulatory_reference VARCHAR(200),
+
+-- Shift qualification tracking
+is_shift_qualified BOOLEAN NOT NULL DEFAULT TRUE,
+qualification_expiry_date DATE,
+minimum_proficiency_required INTEGER CHECK (minimum_proficiency_required BETWEEN 1 AND 5),
+required_for_positions UUID[],
+required_for_locations UUID[],
+
+-- Audit columns (aligned with schema standards)
+created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+updated_by UUID REFERENCES hr.employees(employee_id),
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+verified_by UUID REFERENCES hr.employees(employee_id),
+verified_at TIMESTAMP WITH TIME ZONE,
+
+-- System metadata (aligned with schema standards)
+metadata JSONB DEFAULT '{}'::jsonb,
+tags TEXT[] DEFAULT '{}',
+
+-- Constraints
+CONSTRAINT chk_certification_dates CHECK (
+valid_to IS NULL OR valid_to >= valid_from
+),
+CONSTRAINT chk_obtained_date CHECK (
+obtained_date <= CURRENT_DATE
+),
+CONSTRAINT chk_renewal_tracking CHECK (
+(renewal_required = FALSE AND renewal_reminder_date IS NULL AND renewal_submitted_date IS NULL) OR
+(renewal_required = TRUE AND renewal_frequency IS NOT NULL)
+),
+CONSTRAINT chk_verification CHECK (
+(is_verified = TRUE AND verified_by IS NOT NULL AND verified_at IS NOT NULL) OR
+(is_verified = FALSE AND verified_by IS NULL AND verified_at IS NULL)
+),
+CONSTRAINT chk_assessment CHECK (
+(assessment_score IS NOT NULL AND assessor_id IS NOT NULL AND assessed_at IS NOT NULL) OR
+(assessment_score IS NULL AND assessor_id IS NULL AND assessed_at IS NULL)
+),
+CONSTRAINT chk_proficiency_consistency CHECK (
+(proficiency_level IS NULL AND proficiency_score IS NULL) OR
+(proficiency_level IS NOT NULL OR proficiency_score IS NOT NULL)
+),
+CONSTRAINT chk_expiry_compliance CHECK (
+(valid_to IS NULL OR valid_to >= CURRENT_DATE) OR
+(status IN ('EXPIRED', 'GRACE_PERIOD', 'RENEWAL_PENDING'))
+),
+CONSTRAINT chk_unique_employee_skill_certification UNIQUE(employee_id, skill_id, certification_type_id, valid_from)
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with schema indexing strategy)
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_employee
+ON scheduling.skill_certification_tracking(employee_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_skill
+ON scheduling.skill_certification_tracking(skill_id, valid_to NULLS FIRST);
+
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_certification
+ON scheduling.skill_certification_tracking(certification_type_id)
+WHERE certification_type_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_employee_cert
+ON scheduling.skill_certification_tracking(employee_certification_id)
+WHERE employee_certification_id IS NOT NULL;
+
+-- Status and compliance indexes
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_status
+ON scheduling.skill_certification_tracking(status, valid_to);
+
+CREATE INDEX IF NOT EXISTS idx_skill_tracking_compliance
+ON scheduling.skill_certification_tracking(compliance_status)
+WHERE compliance_status IS NOT NULL;
+
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION (Aligned with schema standards)
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_skill_certification_tracking_updated_at
+ON scheduling.skill_certification_tracking;
+
+CREATE TRIGGER trg_skill_certification_tracking_updated_at
+BEFORE UPDATE ON scheduling.skill_certification_tracking
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- FIX: Trigger to calculate days_until_expiry (replaces GENERATED column)
+CREATE OR REPLACE FUNCTION scheduling.calculate_days_until_expiry()
+RETURNS TRIGGER AS $$
+BEGIN
+-- Calculate days until expiry
+IF NEW.valid_to IS NOT NULL THEN
+NEW.days_until_expiry := NEW.valid_to - CURRENT_DATE;
+ELSE
+NEW.days_until_expiry := NULL;
+END IF;
+
+-- Auto-update status based on validity dates
+IF NEW.valid_to IS NOT NULL THEN
+IF NEW.valid_to < CURRENT_DATE THEN
+IF NEW.status NOT IN ('EXPIRED', 'REVOKED', 'SUSPENDED') THEN
+NEW.status := 'EXPIRED'::scheduling.skill_certification_status_enum;
+NEW.compliance_status := 'NON_COMPLIANT'::scheduling.certification_compliance_status_enum;
+END IF;
+ELSIF NEW.valid_to < CURRENT_DATE + INTERVAL '30 days' THEN
+IF NEW.status = 'ACTIVE' THEN
+NEW.status := 'GRACE_PERIOD'::scheduling.skill_certification_status_enum;
+NEW.compliance_status := 'AT_RISK'::scheduling.certification_compliance_status_enum;
+END IF;
+ELSIF NEW.status IN ('EXPIRED', 'GRACE_PERIOD') THEN
+NEW.status := 'ACTIVE'::scheduling.skill_certification_status_enum;
+NEW.compliance_status := 'COMPLIANT'::scheduling.certification_compliance_status_enum;
+END IF;
+END IF;
+
+-- Auto-update renewal reminder flag
+IF NEW.renewal_required = TRUE
+AND NEW.valid_to IS NOT NULL
+AND NEW.valid_to < CURRENT_DATE + INTERVAL '60 days'
+AND NEW.renewal_reminder_sent = FALSE THEN
+NEW.renewal_reminder_sent := TRUE;
+NEW.renewal_reminder_date := CURRENT_DATE;
+END IF;
+
+-- Update shift qualification status
+IF NEW.status IN ('EXPIRED', 'SUSPENDED', 'REVOKED') THEN
+NEW.is_shift_qualified := FALSE;
+ELSIF NEW.status = 'ACTIVE' AND (NEW.valid_to IS NULL OR NEW.valid_to >= CURRENT_DATE) THEN
+NEW.is_shift_qualified := TRUE;
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_skill_certification_tracking_expiry_calc
+ON scheduling.skill_certification_tracking;
+
+CREATE TRIGGER trg_skill_certification_tracking_expiry_calc
+BEFORE INSERT OR UPDATE OF valid_to, status ON scheduling.skill_certification_tracking
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.calculate_days_until_expiry();
+
+-- Trigger to auto-generate tracking code
+CREATE OR REPLACE FUNCTION scheduling.generate_tracking_code()
+RETURNS TRIGGER AS $$
+DECLARE
+v_employee_code VARCHAR(20);
+v_skill_code VARCHAR(20);
+v_sequence_number INTEGER;
+v_date_suffix VARCHAR(8);
+BEGIN
+IF NEW.tracking_code IS NULL THEN
+-- Get employee code if available
+SELECT employee_code INTO v_employee_code
+FROM hr.employees
+WHERE employee_id = NEW.employee_id;
+
+-- Get skill code if available
+SELECT skill_code INTO v_skill_code
+FROM hr.skills
+WHERE skill_id = NEW.skill_id;
+
+-- Generate date suffix
+v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+
+-- Generate sequence number for today
+SELECT COALESCE(MAX(CAST(SUBSTRING(tracking_code FROM 13) AS INTEGER)), 0) + 1
+INTO v_sequence_number
+FROM scheduling.skill_certification_tracking
+WHERE tracking_code LIKE 'SCT-%-' || v_date_suffix || '-%';
+
+-- Format tracking code: SCT-EMP-SKILL-YYYYMMDD-###
+IF v_employee_code IS NOT NULL AND v_skill_code IS NOT NULL THEN
+NEW.tracking_code := 'SCT-' ||
+SUBSTRING(v_employee_code FROM 1 FOR 3) || '-' ||
+SUBSTRING(v_skill_code FROM 1 FOR 3) || '-' ||
+v_date_suffix || '-' ||
+LPAD(v_sequence_number::TEXT, 3, '0');
+ELSE
+NEW.tracking_code := 'SCT-SYS-' || v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+END IF;
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_skill_certification_tracking_code
+ON scheduling.skill_certification_tracking;
+
+CREATE TRIGGER trg_skill_certification_tracking_code
+BEFORE INSERT ON scheduling.skill_certification_tracking
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_tracking_code();
+
+-- Trigger to validate skill-certification relationship
+CREATE OR REPLACE FUNCTION scheduling.validate_skill_certification()
+RETURNS TRIGGER AS $$
+DECLARE
+v_skill_requires_cert BOOLEAN;
+BEGIN
+-- Check if skill requires certification
+SELECT is_certification_required INTO v_skill_requires_cert
+FROM hr.skills
+WHERE skill_id = NEW.skill_id;
+
+-- Warn if certification is required but not provided
+IF v_skill_requires_cert = TRUE AND NEW.certification_type_id IS NULL THEN
+RAISE WARNING 'Skill % requires certification but none provided for employee %',
+NEW.skill_id, NEW.employee_id;
+END IF;
+
+-- Validate assessment requirements
+IF NEW.assessment_score IS NOT NULL AND NEW.assessment_score < 70 THEN
+RAISE WARNING 'Assessment score % is below minimum threshold (70) for employee % skill %',
+NEW.assessment_score, NEW.employee_id, NEW.skill_id;
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_skill_certification_tracking_validate
+ON scheduling.skill_certification_tracking;
+
+CREATE TRIGGER trg_skill_certification_tracking_validate
+BEFORE INSERT OR UPDATE ON scheduling.skill_certification_tracking
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_skill_certification();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION (Aligned with schema standards)
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.skill_certification_tracking IS
+'Tracks employee skills, certifications, and training requirements for compliance and scheduling qualification.
+Integrates with hr.employee_skills and hr.employee_certifications for comprehensive qualification management.
+Supports skill-based scheduling, compliance tracking, and training gap identification.
+Enables automated renewal reminders and expiry tracking. Provides audit trail for regulatory compliance.';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.tracking_id IS
+'Unique identifier for the tracking record (UUID)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.tracking_code IS
+'Business-readable tracking code (format: SCT-EMP-SKILL-YYYYMMDD-###)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.employee_id IS
+'Reference to the employee (hr.employees)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.skill_id IS
+'Reference to the skill (hr.skills)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.certification_type_id IS
+'Reference to certification type (hr.certification_types)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.employee_certification_id IS
+'Reference to employee certification record (hr.employee_certifications)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.employee_skill_id IS
+'Reference to employee skill record (hr.employee_skills)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.status IS
+'Current certification/skill status (ACTIVE, EXPIRED, SUSPENDED, etc.)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.is_verified IS
+'Indicates if certification/skill has been verified';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.verification_method IS
+'Method used for verification (TEST, TRAINING_COMPLETION, etc.)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.valid_from IS
+'Date when certification/skill becomes valid';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.valid_to IS
+'Date when certification/skill expires (NULL = no expiry)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.days_until_expiry IS
+'Calculated days remaining until expiry (updated by trigger)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.renewal_required IS
+'Indicates if certification/skill requires periodic renewal';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.renewal_frequency IS
+'How often renewal is required (ANNUAL, BIENNIAL, etc.)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.training_provider IS
+'Name of training provider';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.training_score IS
+'Score achieved in training (0-100)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.assessment_score IS
+'Score achieved in assessment (0-100)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.proficiency_level IS
+'Proficiency level (BEGINNER, INTERMEDIATE, ADVANCED, EXPERT, MASTER)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.proficiency_score IS
+'Numerical proficiency score (0-100)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.is_shift_qualified IS
+'Indicates if employee is qualified for shifts requiring this skill/certification';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.compliance_status IS
+'Compliance status (COMPLIANT, NON_COMPLIANT, AT_RISK, GRACE_PERIOD, EXEMPT)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.regulatory_body IS
+'Regulatory body requiring this certification (e.g., OSHA, NLRB)';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.regulatory_reference IS
+'Reference code for regulatory requirement';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.required_for_positions IS
+'Array of position IDs requiring this skill/certification';
+
+COMMENT ON COLUMN scheduling.skill_certification_tracking.required_for_locations IS
+'Array of location IDs requiring this skill/certification';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- View for expiring certifications
+CREATE OR REPLACE VIEW scheduling.vw_expiring_certifications AS
+SELECT
+sct.tracking_id,
+sct.tracking_code,
+e.employee_id,
+e.employee_code,
+e.first_name,
+e.last_name,
+e.email,
+s.skill_id,
+s.skill_code,
+s.name AS skill_name,
+ct.certification_type_id,
+ct.type_name AS certification_name,
+sct.valid_from,
+sct.valid_to,
+sct.days_until_expiry,
+sct.status,
+sct.compliance_status,
+sct.is_shift_qualified,
+sct.renewal_required,
+sct.renewal_reminder_sent,
+sct.verified_by,
+sct.verified_at,
+d.department_name,
+l.location_name,
+CASE
+WHEN sct.days_until_expiry <= 0 THEN 'EXPIRED'
+WHEN sct.days_until_expiry <= 30 THEN 'URGENT'
+WHEN sct.days_until_expiry <= 60 THEN 'WARNING'
+WHEN sct.days_until_expiry <= 90 THEN 'ATTENTION'
+ELSE 'OK'
+END AS urgency_level
+FROM scheduling.skill_certification_tracking sct
+JOIN hr.employees e ON sct.employee_id = e.employee_id
+JOIN hr.skills s ON sct.skill_id = s.skill_id
+LEFT JOIN hr.certification_types ct ON sct.certification_type_id = ct.certification_type_id
+LEFT JOIN hr.departments d ON e.department_id = d.department_id
+LEFT JOIN operations.locations l ON e.location_id = l.location_id
+WHERE sct.valid_to IS NOT NULL
+AND sct.valid_to <= CURRENT_DATE + INTERVAL '90 days'
+AND sct.status NOT IN ('REVOKED', 'SUSPENDED')
+ORDER BY sct.days_until_expiry ASC, e.last_name, e.first_name;
+
+COMMENT ON VIEW scheduling.vw_expiring_certifications IS
+'View of certifications expiring within 90 days with urgency levels for proactive renewal management';
+
+-- View for compliance status summary
+CREATE OR REPLACE VIEW scheduling.vw_certification_compliance_summary AS
+SELECT
+d.department_id,
+d.department_name,
+l.location_id,
+l.location_name,
+COUNT(*) AS total_certifications,
+COUNT(CASE WHEN sct.compliance_status = 'COMPLIANT' THEN 1 END) AS compliant_count,
+COUNT(CASE WHEN sct.compliance_status = 'NON_COMPLIANT' THEN 1 END) AS non_compliant_count,
+COUNT(CASE WHEN sct.compliance_status = 'AT_RISK' THEN 1 END) AS at_risk_count,
+COUNT(CASE WHEN sct.compliance_status = 'GRACE_PERIOD' THEN 1 END) AS grace_period_count,
+ROUND(
+COUNT(CASE WHEN sct.compliance_status = 'COMPLIANT' THEN 1 END)::NUMERIC /
+NULLIF(COUNT(*), 0) * 100, 2
+) AS compliance_percentage,
+COUNT(CASE WHEN sct.status = 'EXPIRED' THEN 1 END) AS expired_count,
+COUNT(CASE WHEN sct.is_shift_qualified = FALSE THEN 1 END) AS unqualified_count,
+COUNT(CASE WHEN sct.renewal_required = TRUE AND sct.renewal_reminder_sent = FALSE THEN 1 END)
+AS pending_renewal_reminders
+FROM scheduling.skill_certification_tracking sct
+JOIN hr.employees e ON sct.employee_id = e.employee_id
+LEFT JOIN hr.departments d ON e.department_id = d.department_id
+LEFT JOIN operations.locations l ON e.location_id = l.location_id
+WHERE e.employment_status = 'ACTIVE'
+GROUP BY d.department_id, d.department_name, l.location_id, l.location_name
+ORDER BY compliance_percentage ASC;
+
+COMMENT ON VIEW scheduling.vw_certification_compliance_summary IS
+'Department and location-level certification compliance summary for management reporting';
+
+-- =============================================================================
+-- View for shift qualification status
+-- =============================================================================
+CREATE OR REPLACE VIEW scheduling.vw_employee_shift_qualifications AS
+SELECT
+    e.employee_id,
+    e.employee_code,
+    e.first_name,
+    e.last_name,
+    e.department_id,
+    e.location_id,
+    sct.skill_id,
+    s.name AS skill_name,  -- FIXED: Changed from s.skill_name to s.name
+    sct.certification_type_id,
+    ct.type_name AS certification_name,
+    sct.status,
+    sct.proficiency_level,
+    sct.proficiency_score,
+    sct.is_shift_qualified,
+    sct.valid_to,
+    sct.days_until_expiry,
+    sct.compliance_status,
+    ARRAY_AGG(DISTINCT p.position_id) FILTER (WHERE p.position_id IS NOT NULL) AS qualified_positions,
+    ARRAY_AGG(DISTINCT loc.location_id) FILTER (WHERE loc.location_id IS NOT NULL) AS qualified_locations
+FROM scheduling.skill_certification_tracking sct
+JOIN hr.employees e ON sct.employee_id = e.employee_id
+JOIN hr.skills s ON sct.skill_id = s.skill_id
+LEFT JOIN hr.certification_types ct ON sct.certification_type_id = ct.certification_type_id
+LEFT JOIN hr.positions p ON p.position_id = ANY(sct.required_for_positions)
+LEFT JOIN operations.locations loc ON loc.location_id = ANY(sct.required_for_locations)
+WHERE e.employment_status = 'ACTIVE'
+  AND sct.status = 'ACTIVE'
+  AND sct.is_shift_qualified = TRUE
+  AND (sct.valid_to IS NULL OR sct.valid_to >= CURRENT_DATE)
+GROUP BY 
+    e.employee_id, 
+    e.employee_code, 
+    e.first_name, 
+    e.last_name,
+    e.department_id, 
+    e.location_id,
+    sct.skill_id, 
+    s.name,  -- FIXED: Changed from s.skill_name to s.name
+    sct.certification_type_id, 
+    ct.type_name,
+    sct.status, 
+    sct.proficiency_level, 
+    sct.proficiency_score,
+    sct.is_shift_qualified, 
+    sct.valid_to, 
+    sct.days_until_expiry,
+    sct.compliance_status
+ORDER BY 
+    e.last_name, 
+    e.first_name, 
+    s.name;  -- FIXED: Changed from s.skill_name to s.name
+
+COMMENT ON VIEW scheduling.vw_employee_shift_qualifications IS 
+'Employee shift qualification status showing qualified skills, certifications, positions, and locations. 
+Displays active employees with valid skill certifications and their qualified positions/locations for shift assignment.';
+
+
+
+-- Verify the view works correctly
+SELECT 
+    employee_code,
+    first_name,
+    last_name,
+    skill_name,
+    certification_name,
+    status,
+    proficiency_level,
+    is_shift_qualified,
+    days_until_expiry,
+    qualified_positions,
+    qualified_locations
+FROM scheduling.vw_employee_shift_qualifications
+LIMIT 10;
+
+-- Verify column structure
+SELECT 
+    column_name, 
+    data_type, 
+    is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'hr'
+  AND table_name = 'skills'
+ORDER BY ordinal_position;
+
+-- =============================================================================
+-- PERMISSION GRANTS (Aligned with schema standards)
+-- =============================================================================
+
+-- -- Grant SELECT to reporting and management roles
+-- GRANT SELECT ON scheduling.skill_certification_tracking TO reporting_role;
+-- GRANT SELECT ON scheduling.skill_certification_tracking TO manager_role;
+-- GRANT SELECT ON scheduling.skill_certification_tracking TO admin_role;
+-- GRANT SELECT ON scheduling.skill_certification_tracking TO hr_role;
+-- GRANT SELECT ON scheduling.skill_certification_tracking TO compliance_role;
+
+-- -- Grant INSERT, UPDATE to appropriate roles
+-- GRANT INSERT, UPDATE ON scheduling.skill_certification_tracking TO admin_role;
+-- GRANT INSERT, UPDATE ON scheduling.skill_certification_tracking TO hr_role;
+
+-- -- Grant DELETE to admin only
+-- GRANT DELETE ON scheduling.skill_certification_tracking TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_expiring_certifications TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT SELECT ON scheduling.vw_certification_compliance_summary TO reporting_role, manager_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_employee_shift_qualifications TO reporting_role, manager_role, admin_role, hr_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema
+FROM information_schema.tables
+WHERE table_name = 'skill_certification_tracking'
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'skill_certification_tracking'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'skill_certification_tracking'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'skill_certification_tracking';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.skill_certification_tracking'::regclass
+ORDER BY conname;
+
+-- Verify enum types
+SELECT
+typname AS enum_name,
+pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN (
+'skill_certification_status_enum',
+'proficiency_level_enum',
+'certification_compliance_status_enum',
+'verification_method_enum',
+'renewal_frequency_enum'
+)
+GROUP BY typname;
+
+-- Test query
+SELECT
+tracking_code,
+employee_id,
+skill_id,
+status,
+compliance_status,
+valid_to,
+days_until_expiry,
+is_shift_qualified
+FROM scheduling.skill_certification_tracking
+WHERE status = 'ACTIVE'
+ORDER BY days_until_expiry ASC NULLS LAST
+LIMIT 10;
+
+
+-- =============================================================================
+-- Serial No: 34 | TABLE: scheduling.schedule_audit_trail
+-- =============================================================================
+-- Description: Comprehensive audit trail for all scheduling-related changes
+-- Business Case: Provides complete historical record of all scheduling changes for
+--                compliance, auditing, and forensic analysis. Supports regulatory
+--                requirements, dispute resolution, and system integrity verification.
+--                Enables reconstruction of system state at any point in time.
+--                Integrates with system.audit_logs for centralized audit management.
+-- KPI: 1. Audit trail completeness rate (>100%), 2. Audit query performance (<2 seconds),
+--      3. Data retention compliance (>99.9%), 4. Forensic analysis success rate (>95%),
+--      5. Regulatory audit preparation time reduction (>70%), 6. Change tracking latency (<1 minute),
+--      6. Audit data compression rate (>80%)
+-- Feature Reference: F-AUD-001, F-AUD-002, F-AUD-003, F-COMP-001, F-COMP-002
+-- Dependencies: hr.employees, scheduling.schedules, scheduling.shifts, 
+--               scheduling.shift_assignments, compliance.union_rules, system.audit_logs
+-- =============================================================================
+
+-- Ensure enum types exist (aligned with schema standards)
+DO $$BEGIN
+-- Audit entity type enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'audit_entity_type_enum') THEN
+CREATE TYPE scheduling.audit_entity_type_enum AS ENUM (
+'SCHEDULE',          -- Schedule entity
+'SHIFT',             -- Shift entity
+'ASSIGNMENT',        -- Shift assignment entity
+'EMPLOYEE',          -- Employee entity
+'POSITION',          -- Position entity
+'LOCATION',          -- Location entity
+'DEPARTMENT',        -- Department entity
+'TEMPLATE',          -- Schedule template entity
+'RULE',              -- Compliance/optimization rule entity
+'PREFERENCE',        -- Employee preference entity
+'EXCEPTION',         -- Schedule exception entity
+'APPROVAL',          -- Approval workflow entity
+'SWAP',              -- Shift swap entity
+'COVERAGE'           -- Coverage requirement entity
+);
+RAISE NOTICE 'Created enum type: scheduling.audit_entity_type_enum';
+END IF;
+
+-- Audit change type enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'audit_change_type_enum') THEN
+CREATE TYPE scheduling.audit_change_type_enum AS ENUM (
+'CREATE',            -- Record created
+'UPDATE',            -- Record updated
+'DELETE',            -- Record deleted
+'PUBLISH',           -- Schedule published
+'APPROVE',           -- Approval granted
+'REJECT',           -- Approval rejected
+'ASSIGN',            -- Assignment made
+'UNASSIGN',          -- Assignment removed
+'SWAP',              -- Shift swap executed
+'CANCEL',            -- Record cancelled
+'ARCHIVE',           -- Record archived
+'RESTORE',          -- Record restored from archive
+'ROLLBACK',         -- Change rolled back
+'EXPORT',           -- Data exported
+'IMPORT'            -- Data imported
+);
+RAISE NOTICE 'Created enum type: scheduling.audit_change_type_enum';
+END IF;
+
+-- Audit impact level enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'audit_impact_level_enum') THEN
+CREATE TYPE scheduling.audit_impact_level_enum AS ENUM (
+'NEGLIGIBLE',        -- No significant impact
+'LOW',               -- Minor impact
+'MEDIUM',            -- Moderate impact
+'HIGH',              -- Significant impact
+'CRITICAL'           -- Critical impact requiring immediate attention
+);
+RAISE NOTICE 'Created enum type: scheduling.audit_impact_level_enum';
+END IF;
+
+-- Archive status enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'archive_status_enum') THEN
+CREATE TYPE scheduling.archive_status_enum AS ENUM (
+'ACTIVE',            -- Currently active record
+'PENDING_ARCHIVE',   -- Scheduled for archiving
+'ARCHIVED',          -- Archived record
+'PURGED'             -- Permanently deleted
+);
+RAISE NOTICE 'Created enum type: scheduling.archive_status_enum';
+END IF;
+END$$;
+
+-- Create the table with proper alignment to schema standards
+-- FIX: Removed GENERATED ALWAYS AS column (not immutable)
+CREATE TABLE IF NOT EXISTS scheduling.schedule_audit_trail (
+    -- Primary identifiers
+    audit_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    audit_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (audit_code ~ '^AUD-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Audit context (aligned with system.audit_logs pattern)
+    tenant_id UUID, -- Multi-tenancy support (optional based on deployment)
+    audit_timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Entity information (aligned with schema standards)
+    entity_type scheduling.audit_entity_type_enum NOT NULL,
+    entity_id UUID NOT NULL,
+    entity_name VARCHAR(200),
+    schedule_id UUID REFERENCES scheduling.schedules(schedule_id) ON DELETE SET NULL,
+    shift_id UUID REFERENCES scheduling.shifts(shift_id) ON DELETE SET NULL,
+    assignment_id UUID REFERENCES scheduling.shift_assignments(assignment_id) ON DELETE SET NULL,
+    
+    -- Change information (using enum type)
+    change_type scheduling.audit_change_type_enum NOT NULL,
+    
+    -- User and session (aligned with hr.employees)
+    user_id UUID NOT NULL REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    user_name VARCHAR(200),
+    user_role VARCHAR(50),
+    session_id UUID, -- Changed from VARCHAR to UUID for consistency
+    ip_address INET,
+    user_agent TEXT,
+    client_application VARCHAR(100),
+    
+    -- Change details (aligned with system.audit_logs pattern)
+    old_values JSONB DEFAULT '{}'::jsonb,
+    new_values JSONB DEFAULT '{}'::jsonb,
+    changed_fields TEXT[] NOT NULL DEFAULT '{}',
+    change_description TEXT,
+    change_summary TEXT,
+    
+    -- Business context
+    business_reason VARCHAR(200),
+    business_justification TEXT,
+    business_process VARCHAR(100),
+    transaction_id UUID, -- Changed from VARCHAR to UUID for consistency
+    
+    -- Impact assessment (using enum type)
+    impact_level scheduling.audit_impact_level_enum DEFAULT 'LOW',
+    affected_employees UUID[] DEFAULT '{}',
+    affected_shifts UUID[] DEFAULT '{}',
+    affected_records INTEGER CHECK (affected_records >= 0),
+    cost_impact NUMERIC(12,2),
+    
+    -- Compliance context (aligned with compliance schema)
+    compliance_rule_id UUID REFERENCES compliance.union_rules(rule_id) ON DELETE SET NULL,
+    regulatory_reference VARCHAR(100),
+    compliance_impact BOOLEAN DEFAULT FALSE,
+    
+    -- Technical context
+    application_version VARCHAR(20),
+    database_schema VARCHAR(50) DEFAULT 'scheduling',
+    table_name VARCHAR(100),
+    operation_type VARCHAR(20) DEFAULT 'DML'
+        CHECK (operation_type IN ('DML', 'DDL', 'PROCEDURE', 'TRIGGER')),
+    
+    -- Archiving and retention (aligned with data_governance standards)
+    -- FIX: Changed from GENERATED to regular column (will be populated by trigger)
+    retention_period_days INTEGER DEFAULT 2555 CHECK (retention_period_days >= 0), -- 7 years
+    archive_status scheduling.archive_status_enum DEFAULT 'ACTIVE',
+    archived_at TIMESTAMP WITH TIME ZONE,
+    purge_eligible_date DATE, -- FIX: Regular column instead of GENERATED
+    days_until_purge INTEGER, -- FIX: Additional helper column (will be populated by trigger)
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata (aligned with schema standards)
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    full_audit_record JSONB NOT NULL DEFAULT '{}'::jsonb,
+    
+    -- Constraints
+    CONSTRAINT chk_audit_values CHECK (
+        (change_type = 'CREATE' AND old_values = '{}'::jsonb AND new_values != '{}'::jsonb) OR
+        (change_type = 'UPDATE' AND old_values != '{}'::jsonb AND new_values != '{}'::jsonb) OR
+        (change_type = 'DELETE' AND old_values != '{}'::jsonb AND new_values = '{}'::jsonb) OR
+        (change_type IN ('PUBLISH', 'APPROVE', 'REJECT', 'ASSIGN', 'UNASSIGN', 'SWAP', 'CANCEL', 'ARCHIVE', 'RESTORE', 'ROLLBACK') 
+         AND old_values IS NOT NULL AND new_values IS NOT NULL)
+    ),
+    CONSTRAINT chk_archive_status CHECK (
+        (archive_status = 'ARCHIVED' AND archived_at IS NOT NULL) OR
+        (archive_status IN ('ACTIVE', 'PENDING_ARCHIVE') AND archived_at IS NULL) OR
+        (archive_status = 'PURGED')
+    ),
+    CONSTRAINT chk_retention_period CHECK (
+        retention_period_days >= 365 -- Minimum 1 year retention
+    ),
+    CONSTRAINT chk_entity_reference CHECK (
+        (entity_type = 'SCHEDULE' AND schedule_id IS NOT NULL) OR
+        (entity_type = 'SHIFT' AND shift_id IS NOT NULL) OR
+        (entity_type = 'ASSIGNMENT' AND assignment_id IS NOT NULL) OR
+        (entity_type IN ('EMPLOYEE', 'POSITION', 'LOCATION', 'DEPARTMENT', 'TEMPLATE', 'RULE', 'PREFERENCE', 'EXCEPTION', 'APPROVAL', 'SWAP', 'COVERAGE'))
+    )
+);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION (FIX: Replaces GENERATED columns)
+-- =============================================================================
+
+-- Trigger to calculate purge_eligible_date and days_until_purge
+CREATE OR REPLACE FUNCTION scheduling.calculate_audit_purge_dates()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Calculate purge eligible date based on archive status
+    IF NEW.archived_at IS NOT NULL THEN
+        NEW.purge_eligible_date := NEW.archived_at::DATE + (NEW.retention_period_days || ' days')::INTERVAL;
+    ELSE
+        NEW.purge_eligible_date := NEW.audit_timestamp::DATE + (NEW.retention_period_days || ' days')::INTERVAL;
+    END IF;
+    
+    -- Calculate days until purge
+    NEW.days_until_purge := NEW.purge_eligible_date - CURRENT_DATE;
+    
+    -- Auto-update archive status if purge date has passed
+    IF NEW.purge_eligible_date < CURRENT_DATE AND NEW.archive_status != 'PURGED' THEN
+        NEW.archive_status := 'PURGED';
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_audit_trail_purge_dates ON scheduling.schedule_audit_trail;
+CREATE TRIGGER trg_schedule_audit_trail_purge_dates
+BEFORE INSERT OR UPDATE OF archived_at, retention_period_days, audit_timestamp ON scheduling.schedule_audit_trail
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.calculate_audit_purge_dates();
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_audit_trail_updated_at ON scheduling.schedule_audit_trail;
+CREATE TRIGGER trg_schedule_audit_trail_updated_at
+BEFORE UPDATE ON scheduling.schedule_audit_trail
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate audit code
+CREATE OR REPLACE FUNCTION scheduling.generate_audit_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_user_code VARCHAR(20);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.audit_code IS NULL THEN
+        -- Get user code if available
+        SELECT employee_code INTO v_user_code
+        FROM hr.employees
+        WHERE employee_id = NEW.user_id;
+        
+        -- Generate date suffix
+        v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+        
+        -- Generate sequence number for today
+        SELECT COALESCE(MAX(CAST(SUBSTRING(audit_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_audit_trail
+        WHERE audit_code LIKE 'AUD-%-' || v_date_suffix || '-%';
+        
+        -- Format audit code: AUD-USER-YYYYMMDD-###
+        IF v_user_code IS NOT NULL THEN
+            NEW.audit_code := 'AUD-' || SUBSTRING(v_user_code FROM 1 FOR 3) || '-' || 
+                             v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        ELSE
+            NEW.audit_code := 'AUD-SYS-' || v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_audit_trail_code ON scheduling.schedule_audit_trail;
+CREATE TRIGGER trg_schedule_audit_trail_code
+BEFORE INSERT ON scheduling.schedule_audit_trail
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_audit_code();
+
+-- Trigger to populate full_audit_record
+CREATE OR REPLACE FUNCTION scheduling.populate_audit_record()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Build comprehensive audit record
+    NEW.full_audit_record := jsonb_build_object(
+        'audit_id', NEW.audit_id,
+        'audit_code', NEW.audit_code,
+        'audit_timestamp', NEW.audit_timestamp,
+        'entity_type', NEW.entity_type,
+        'entity_id', NEW.entity_id,
+        'entity_name', NEW.entity_name,
+        'change_type', NEW.change_type,
+        'user_id', NEW.user_id,
+        'user_name', NEW.user_name,
+        'user_role', NEW.user_role,
+        'ip_address', NEW.ip_address,
+        'session_id', NEW.session_id,
+        'old_values', NEW.old_values,
+        'new_values', NEW.new_values,
+        'changed_fields', NEW.changed_fields,
+        'change_description', NEW.change_description,
+        'business_reason', NEW.business_reason,
+        'impact_level', NEW.impact_level,
+        'affected_records', NEW.affected_records,
+        'compliance_impact', NEW.compliance_impact,
+        'table_name', NEW.table_name,
+        'application_version', NEW.application_version
+    );
+    
+    -- Auto-set compliance impact flag for certain change types
+    IF NEW.change_type IN ('APPROVE', 'REJECT', 'PUBLISH', 'DELETE') THEN
+        NEW.compliance_impact := TRUE;
+    END IF;
+    
+    -- Auto-set impact level based on change type
+    IF NEW.impact_level IS NULL THEN
+        CASE NEW.change_type
+            WHEN 'DELETE' THEN NEW.impact_level := 'HIGH'::scheduling.audit_impact_level_enum;
+            WHEN 'CREATE' THEN NEW.impact_level := 'LOW'::scheduling.audit_impact_level_enum;
+            WHEN 'UPDATE' THEN NEW.impact_level := 'MEDIUM'::scheduling.audit_impact_level_enum;
+            ELSE NEW.impact_level := 'LOW'::scheduling.audit_impact_level_enum;
+        END CASE;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_audit_trail_populate ON scheduling.schedule_audit_trail;
+CREATE TRIGGER trg_schedule_audit_trail_populate
+BEFORE INSERT OR UPDATE OF old_values, new_values, changed_fields ON scheduling.schedule_audit_trail
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.populate_audit_record();
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with schema indexing strategy)
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_timestamp
+ON scheduling.schedule_audit_trail(audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_entity
+ON scheduling.schedule_audit_trail(entity_type, entity_id, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_user
+ON scheduling.schedule_audit_trail(user_id, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_change_type
+ON scheduling.schedule_audit_trail(change_type, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_tenant
+ON scheduling.schedule_audit_trail(tenant_id, audit_timestamp DESC)
+WHERE tenant_id IS NOT NULL;
+
+-- Entity-specific indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_schedule
+ON scheduling.schedule_audit_trail(schedule_id, audit_timestamp DESC)
+WHERE schedule_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_shift
+ON scheduling.schedule_audit_trail(shift_id, audit_timestamp DESC)
+WHERE shift_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_assignment
+ON scheduling.schedule_audit_trail(assignment_id, audit_timestamp DESC)
+WHERE assignment_id IS NOT NULL;
+
+-- Archive and retention indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_archive_status
+ON scheduling.schedule_audit_trail(archive_status, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_purge_eligible
+ON scheduling.schedule_audit_trail(purge_eligible_date)
+WHERE archive_status != 'PURGED';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_days_until_purge
+ON scheduling.schedule_audit_trail(days_until_purge)
+WHERE days_until_purge IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_retention
+ON scheduling.schedule_audit_trail(retention_period_days, audit_timestamp DESC)
+WHERE archive_status = 'ACTIVE';
+
+-- Impact and compliance indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_impact
+ON scheduling.schedule_audit_trail(impact_level, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_compliance
+ON scheduling.schedule_audit_trail(compliance_impact, audit_timestamp DESC)
+WHERE compliance_impact = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_regulatory
+ON scheduling.schedule_audit_trail(regulatory_reference)
+WHERE regulatory_reference IS NOT NULL;
+
+-- JSONB and array indexes (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_fields
+ON scheduling.schedule_audit_trail USING GIN(changed_fields);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_full_record
+ON scheduling.schedule_audit_trail USING GIN(full_audit_record);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_old_values
+ON scheduling.schedule_audit_trail USING GIN(old_values)
+WHERE old_values != '{}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_new_values
+ON scheduling.schedule_audit_trail USING GIN(new_values)
+WHERE new_values != '{}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_metadata
+ON scheduling.schedule_audit_trail USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_tags
+ON scheduling.schedule_audit_trail USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_affected_employees
+ON scheduling.schedule_audit_trail USING GIN(affected_employees);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_affected_shifts
+ON scheduling.schedule_audit_trail USING GIN(affected_shifts);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_entity_time
+ON scheduling.schedule_audit_trail(entity_type, entity_id, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_user_time
+ON scheduling.schedule_audit_trail(user_id, change_type, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_type_time
+ON scheduling.schedule_audit_trail(change_type, entity_type, audit_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_impact_time
+ON scheduling.schedule_audit_trail(impact_level, audit_timestamp DESC);
+
+
+
+-- BRIN index for time-series data (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_time_brin
+ON scheduling.schedule_audit_trail USING BRIN(audit_timestamp, created_at);
+
+-- Partial indexes for common filters
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_active
+ON scheduling.schedule_audit_trail(audit_timestamp DESC)
+WHERE archive_status = 'ACTIVE';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_audit_critical
+ON scheduling.schedule_audit_trail(audit_timestamp DESC)
+WHERE impact_level = 'CRITICAL';
+
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION (Aligned with schema standards)
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_audit_trail IS 
+'Comprehensive audit trail for all scheduling-related changes with full change history and forensic capabilities.
+Provides complete historical record of all scheduling changes for compliance, auditing, and forensic analysis.
+Supports regulatory requirements, dispute resolution, and system integrity verification. Enables reconstruction
+of system state at any point in time. Integrates with system.audit_logs for centralized audit management.
+Maintains data retention compliance with automated archiving and purge eligibility tracking.';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.audit_id IS 
+'Unique identifier for the audit record (UUID)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.audit_code IS 
+'Business-readable audit code (format: AUD-XXX-YYYYMMDD-###)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.tenant_id IS 
+'Multi-tenancy isolation identifier (optional based on deployment)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.audit_timestamp IS 
+'Timestamp when the audit event occurred';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.entity_type IS 
+'Type of entity being audited (SCHEDULE, SHIFT, ASSIGNMENT, etc.)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.entity_id IS 
+'ID of the specific entity that was changed';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.entity_name IS 
+'Human-readable name of the entity';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.schedule_id IS 
+'Reference to schedule (if applicable)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.shift_id IS 
+'Reference to shift (if applicable)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.assignment_id IS 
+'Reference to assignment (if applicable)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.change_type IS 
+'Type of change operation (CREATE, UPDATE, DELETE, PUBLISH, etc.)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.user_id IS 
+'Employee ID of the user who made the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.user_name IS 
+'Name of the user who made the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.user_role IS 
+'Role of the user at time of change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.session_id IS 
+'Session identifier for the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.ip_address IS 
+'IP address from which the change was made';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.user_agent IS 
+'User agent string from the client';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.client_application IS 
+'Name of the client application';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.old_values IS 
+'JSONB storage of values before the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.new_values IS 
+'JSONB storage of values after the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.changed_fields IS 
+'Array of field names that were changed in this event';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.change_description IS 
+'Human-readable description of the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.change_summary IS 
+'Brief summary of the change for quick reference';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.business_reason IS 
+'Business justification for the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.business_justification IS 
+'Detailed business justification for the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.business_process IS 
+'Business process that triggered the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.transaction_id IS 
+'Transaction identifier for the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.impact_level IS 
+'Assessment of change impact (NEGLIGIBLE, LOW, MEDIUM, HIGH, CRITICAL)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.affected_employees IS 
+'Array of employee IDs affected by this change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.affected_shifts IS 
+'Array of shift IDs affected by this change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.affected_records IS 
+'Number of records affected by this change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.cost_impact IS 
+'Estimated cost impact of the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.compliance_rule_id IS 
+'Reference to compliance rule if change relates to compliance';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.regulatory_reference IS 
+'Reference to regulatory requirement if applicable';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.compliance_impact IS 
+'Indicates if change has compliance implications';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.application_version IS 
+'Version of application that made the change';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.database_schema IS 
+'Database schema where change occurred';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.table_name IS 
+'Table name where change occurred';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.operation_type IS 
+'Type of database operation (DML, DDL, PROCEDURE, TRIGGER)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.retention_period_days IS 
+'Number of days to retain this audit record';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.archive_status IS 
+'Current archive status (ACTIVE, PENDING_ARCHIVE, ARCHIVED, PURGED)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.archived_at IS 
+'Timestamp when record was archived';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.purge_eligible_date IS 
+'Date when record becomes eligible for purging (calculated by trigger)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.days_until_purge IS 
+'Number of days until record can be purged (calculated by trigger)';
+
+COMMENT ON COLUMN scheduling.schedule_audit_trail.full_audit_record IS 
+'Complete audit record in JSONB format for easy export and analysis';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- View for recent critical audits
+CREATE OR REPLACE VIEW scheduling.vw_critical_audit_events AS
+SELECT
+    audit_id,
+    audit_code,
+    audit_timestamp,
+    entity_type,
+    entity_id,
+    entity_name,
+    change_type,
+    user_id,
+    user_name,
+    user_role,
+    ip_address,
+    change_description,
+    business_reason,
+    impact_level,
+    affected_records,
+    compliance_impact,
+    regulatory_reference,
+    days_until_purge
+FROM scheduling.schedule_audit_trail
+WHERE impact_level IN ('HIGH', 'CRITICAL')
+OR compliance_impact = TRUE
+ORDER BY audit_timestamp DESC
+LIMIT 1000;
+
+COMMENT ON VIEW scheduling.vw_critical_audit_events IS 
+'View of recent critical audit events requiring immediate attention';
+
+-- View for compliance-related audits
+CREATE OR REPLACE VIEW scheduling.vw_compliance_audit_events AS
+SELECT
+    audit_id,
+    audit_code,
+    audit_timestamp,
+    entity_type,
+    entity_id,
+    change_type,
+    user_id,
+    user_name,
+    change_description,
+    compliance_rule_id,
+    regulatory_reference,
+    business_justification,
+    full_audit_record
+FROM scheduling.schedule_audit_trail
+WHERE compliance_impact = TRUE
+OR regulatory_reference IS NOT NULL
+ORDER BY audit_timestamp DESC;
+
+COMMENT ON VIEW scheduling.vw_compliance_audit_events IS 
+'View of compliance-related audit events for regulatory reporting';
+
+-- View for audit trail by entity
+CREATE OR REPLACE VIEW scheduling.vw_entity_audit_history AS
+SELECT
+    entity_type,
+    entity_id,
+    entity_name,
+    audit_timestamp,
+    change_type,
+    user_name,
+    change_description,
+    old_values,
+    new_values,
+    changed_fields,
+    impact_level,
+    audit_code
+FROM scheduling.schedule_audit_trail
+WHERE archive_status = 'ACTIVE'
+ORDER BY entity_type, entity_id, audit_timestamp DESC;
+
+COMMENT ON VIEW scheduling.vw_entity_audit_history IS 
+'View of complete audit history for any entity type';
+
+-- View for purge-eligible audit records
+CREATE OR REPLACE VIEW scheduling.vw_purge_eligible_audits AS
+SELECT
+    audit_id,
+    audit_code,
+    audit_timestamp,
+    entity_type,
+    entity_id,
+    archive_status,
+    retention_period_days,
+    purge_eligible_date,
+    days_until_purge,
+    CURRENT_DATE - purge_eligible_date AS days_since_eligible
+FROM scheduling.schedule_audit_trail
+WHERE archive_status != 'PURGED'
+AND purge_eligible_date <= CURRENT_DATE
+ORDER BY purge_eligible_date ASC;
+
+COMMENT ON VIEW scheduling.vw_purge_eligible_audits IS 
+'View of audit records eligible for purging based on retention policy';
+
+-- -- =============================================================================
+-- -- PERMISSION GRANTS (Aligned with schema standards)
+-- -- =============================================================================
+
+-- -- Grant SELECT to reporting and compliance roles
+-- GRANT SELECT ON scheduling.schedule_audit_trail TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_audit_trail TO manager_role;
+-- GRANT SELECT ON scheduling.schedule_audit_trail TO admin_role;
+-- GRANT SELECT ON scheduling.schedule_audit_trail TO hr_role;
+-- GRANT SELECT ON scheduling.schedule_audit_trail TO compliance_role;
+
+-- -- Grant INSERT to system and admin roles (audits are typically system-generated)
+-- GRANT INSERT ON scheduling.schedule_audit_trail TO admin_role;
+-- GRANT INSERT ON scheduling.schedule_audit_trail TO scheduler_role;
+
+-- -- Grant UPDATE to admin only (for archiving purposes)
+-- GRANT UPDATE ON scheduling.schedule_audit_trail TO admin_role;
+
+-- -- Grant DELETE to admin only (for purging purposes)
+-- GRANT DELETE ON scheduling.schedule_audit_trail TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_critical_audit_events TO reporting_role, manager_role, admin_role, compliance_role;
+-- GRANT SELECT ON scheduling.vw_compliance_audit_events TO reporting_role, admin_role, compliance_role;
+-- GRANT SELECT ON scheduling.vw_entity_audit_history TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT SELECT ON scheduling.vw_purge_eligible_audits TO admin_role;
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES (Aligned with schema standards)
+-- =============================================================================
+
+-- Procedure to archive old audit records
+CREATE OR REPLACE PROCEDURE scheduling.archive_old_audit_records(
+    p_days_old INTEGER DEFAULT 365,
+    p_batch_size INTEGER DEFAULT 5000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_archived_count INTEGER;
+BEGIN
+    -- Archive audit records older than specified days
+    WITH archived AS (
+        UPDATE scheduling.schedule_audit_trail
+        SET archive_status = 'ARCHIVED',
+            archived_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE audit_id IN (
+            SELECT audit_id
+            FROM scheduling.schedule_audit_trail
+            WHERE audit_timestamp < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+            AND archive_status = 'ACTIVE'
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_archived_count FROM archived;
+    
+    RAISE NOTICE 'Archived % old audit records', v_archived_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_ARCHIVE',
+        'scheduling.archive_old_audit_records',
+        format('Archived %s audit records older than %s days', v_archived_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('archived_count', v_archived_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.archive_old_audit_records IS 
+'Archives old audit records to maintain table performance while preserving data for compliance';
+
+-- Procedure to purge archived audit records
+CREATE OR REPLACE PROCEDURE scheduling.purge_archived_audit_records(
+    p_days_after_archive INTEGER DEFAULT 2555, -- 7 years after archiving
+    p_batch_size INTEGER DEFAULT 1000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_purged_count INTEGER;
+BEGIN
+    -- Purge archived audit records that have exceeded retention period
+    WITH purged AS (
+        DELETE FROM scheduling.schedule_audit_trail
+        WHERE audit_id IN (
+            SELECT audit_id
+            FROM scheduling.schedule_audit_trail
+            WHERE archive_status = 'ARCHIVED'
+            AND archived_at < CURRENT_TIMESTAMP - (p_days_after_archive || ' days')::INTERVAL
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    SELECT COUNT(*) INTO v_purged_count FROM purged;
+    
+    RAISE NOTICE 'Purged % archived audit records', v_purged_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_PURGE',
+        'scheduling.purge_archived_audit_records',
+        format('Purged %s archived audit records', v_purged_count),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('purged_count', v_purged_count, 'days_after_archive', p_days_after_archive)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.purge_archived_audit_records IS 
+'Permanently deletes archived audit records that have exceeded retention period';
+
+-- -- Grant execute permissions
+-- GRANT EXECUTE ON PROCEDURE scheduling.archive_old_audit_records TO admin_role;
+-- GRANT EXECUTE ON PROCEDURE scheduling.purge_archived_audit_records TO admin_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name = 'schedule_audit_trail' 
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_audit_trail'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_audit_trail'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_audit_trail';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.schedule_audit_trail'::regclass
+ORDER BY conname;
+
+-- Verify enum types
+SELECT
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN (
+    'audit_entity_type_enum',
+    'audit_change_type_enum',
+    'audit_impact_level_enum',
+    'archive_status_enum'
+)
+GROUP BY typname;
+
+-- Test query
+SELECT 
+    audit_code,
+    entity_type,
+    entity_id,
+    change_type,
+    user_name,
+    audit_timestamp,
+    impact_level,
+    compliance_impact,
+    purge_eligible_date,
+    days_until_purge
+FROM scheduling.schedule_audit_trail
+WHERE archive_status = 'ACTIVE'
+ORDER BY audit_timestamp DESC
+LIMIT 10;
+
+
+-- =============================================================================
+-- Serial No: 35 | TABLE: scheduling.shift_bidding
+-- =============================================================================
+-- Description: Manages shift bidding processes for employee shift selection
+-- Business Case: Enables fair and transparent shift assignment through bidding processes.
+--                Supports employee autonomy in shift selection while maintaining business
+--                needs. Implements bidding rules, prioritization, and fairness algorithms.
+--                Improves employee satisfaction and reduces shift assignment conflicts.
+--                Integrates with scheduling.shift_assignments for seamless bid-to-assignment
+--                workflow and with hr.employee_preferences for preference-based bidding.
+-- KPI: 1. Bidding participation rate (>80%), 2. Bid fulfillment rate (>70%),
+--      3. Employee satisfaction with bidding process (>4/5), 4. Bidding fairness score (>0.8),
+--      5. Manager time saved on shift assignment (>60%), 6. Bidding cycle time (<48 hours),
+--      7. System bidding automation rate (>90%)
+-- Feature Reference: F-SCH-042, F-SCH-043, F-SCH-044, F-EMP-015, F-FAIR-001
+-- Dependencies: scheduling.shifts, scheduling.shift_assignments, hr.employees,
+--               scheduling.bidding_rounds, scheduling.staffing_optimization_rules
+-- =============================================================================
+
+-- Ensure enum types exist (aligned with schema standards)
+DO $$BEGIN
+-- Bid type enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'bid_type_enum') THEN
+CREATE TYPE scheduling.bid_type_enum AS ENUM (
+'PREFERENCE',     -- Employee expresses preference for shift
+'REQUEST',        -- Employee requests specific shift
+'OFFER',          -- Employee offers to take shift
+'SWAP',           -- Employee offers to swap shifts
+'BID',            -- Competitive bid for shift
+'CLAIM'           -- First-come-first-served claim
+);
+RAISE NOTICE 'Created enum type: scheduling.bid_type_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.bid_type_enum already exists';
+END IF;
+
+-- Bid status enum
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'bid_status_enum') THEN
+CREATE TYPE scheduling.bid_status_enum AS ENUM (
+'SUBMITTED',      -- Bid submitted by employee
+'PENDING',        -- Awaiting review/processing
+'APPROVED',       -- Bid approved
+'REJECTED',      -- Bid rejected
+'WITHDRAWN',      -- Bid withdrawn by employee
+'EXPIRED',        -- Bid expired without processing
+'WAITLISTED',     -- Bid placed on waitlist
+'ASSIGNED',       -- Bid resulted in assignment
+'CONFLICTED'      -- Bid has scheduling conflict
+);
+RAISE NOTICE 'Created enum type: scheduling.bid_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.bid_status_enum already exists';
+END IF;
+
+-- Assignment status enum (reuse from schema or create)
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'bidding_assignment_status_enum') THEN
+CREATE TYPE scheduling.bidding_assignment_status_enum AS ENUM (
+'ASSIGNED',       -- Successfully assigned to shift
+'NOT_ASSIGNED',   -- Not assigned to shift
+'WAITLISTED',     -- On waitlist for shift
+'PARTIALLY_ASSIGNED' -- Partially assigned (e.g., split shift)
+);
+RAISE NOTICE 'Created enum type: scheduling.bidding_assignment_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.bidding_assignment_status_enum already exists';
+END IF;
+END$$;
+
+-- Create bidding_rounds table first (dependency)
+CREATE TABLE IF NOT EXISTS scheduling.bidding_rounds (
+round_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+round_code VARCHAR(50) UNIQUE NOT NULL
+CHECK (round_code ~ '^BID-RND-[A-Z0-9]{6}-[0-9]{6}$'),
+round_name VARCHAR(200) NOT NULL,
+description TEXT,
+schedule_id UUID REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+department_id UUID REFERENCES hr.departments(department_id),
+location_id UUID REFERENCES operations.locations(location_id),
+-- Timing
+start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+end_date TIMESTAMP WITH TIME ZONE NOT NULL,
+processing_date TIMESTAMP WITH TIME ZONE,
+-- Bidding rules
+bidding_method VARCHAR(50) NOT NULL DEFAULT 'SENIORITY'
+CHECK (bidding_method IN ('SENIORITY', 'POINTS', 'RANDOM', 'PERFORMANCE', 'MIXED', 'FIRST_COME_FIRST_SERVED')),
+max_bids_per_employee INTEGER DEFAULT 10 CHECK (max_bids_per_employee >= 1),
+min_bids_per_employee INTEGER DEFAULT 0 CHECK (min_bids_per_employee >= 0),
+points_per_employee INTEGER DEFAULT 100 CHECK (points_per_employee >= 0),
+allow_swap_bids BOOLEAN NOT NULL DEFAULT TRUE,
+allow_preference_bids BOOLEAN NOT NULL DEFAULT TRUE,
+-- Status
+status VARCHAR(20) NOT NULL DEFAULT 'DRAFT'
+CHECK (status IN ('DRAFT', 'ACTIVE', 'PROCESSING', 'COMPLETED', 'CANCELLED')),
+-- Results
+total_bids INTEGER DEFAULT 0,
+approved_bids INTEGER DEFAULT 0,
+rejected_bids INTEGER DEFAULT 0,
+fulfillment_rate NUMERIC(5,2) CHECK (fulfillment_rate BETWEEN 0 AND 100),
+-- Audit
+created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+updated_by UUID REFERENCES hr.employees(employee_id),
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+metadata JSONB DEFAULT '{}'::jsonb,
+-- Constraints
+CONSTRAINT chk_round_dates CHECK (end_date > start_date),
+CONSTRAINT chk_processing_date CHECK (
+processing_date IS NULL OR processing_date >= end_date
+)
+);
+
+-- Indexes for bidding_rounds
+CREATE INDEX IF NOT EXISTS idx_bidding_rounds_schedule
+ON scheduling.bidding_rounds(schedule_id);
+CREATE INDEX IF NOT EXISTS idx_bidding_rounds_status
+ON scheduling.bidding_rounds(status, start_date);
+CREATE INDEX IF NOT EXISTS idx_bidding_rounds_dates
+ON scheduling.bidding_rounds(start_date, end_date);
+CREATE INDEX IF NOT EXISTS idx_bidding_rounds_active
+ON scheduling.bidding_rounds(status) WHERE status = 'ACTIVE';
+
+-- Trigger for bidding_rounds updated_at
+DROP TRIGGER IF EXISTS trg_bidding_rounds_updated_at ON scheduling.bidding_rounds;
+CREATE TRIGGER trg_bidding_rounds_updated_at
+BEFORE UPDATE ON scheduling.bidding_rounds
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- create the shift_bidding table
+CREATE TABLE IF NOT EXISTS scheduling.shift_bidding (
+-- Primary identifiers
+bid_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+bid_code VARCHAR(50) UNIQUE NOT NULL
+CHECK (bid_code ~ '^BID-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+-- Bidding context (aligned with schema foreign key standards)
+shift_id UUID NOT NULL REFERENCES scheduling.shifts(shift_id) ON DELETE CASCADE,
+employee_id UUID NOT NULL REFERENCES hr.employees(employee_id) ON DELETE CASCADE,
+bidding_round_id UUID REFERENCES scheduling.bidding_rounds(round_id) ON DELETE SET NULL,
+schedule_id UUID REFERENCES scheduling.schedules(schedule_id) ON DELETE SET NULL,
+
+-- Bid details (using enum types)
+bid_type scheduling.bid_type_enum NOT NULL DEFAULT 'PREFERENCE',
+bid_status scheduling.bid_status_enum NOT NULL DEFAULT 'SUBMITTED',
+
+-- Bid parameters
+bid_priority INTEGER DEFAULT 5 CHECK (bid_priority BETWEEN 1 AND 10),
+bid_points_used INTEGER DEFAULT 0 CHECK (bid_points_used >= 0),
+bid_preference_score NUMERIC(5,2) CHECK (bid_preference_score BETWEEN 0 AND 100),
+bid_ranking INTEGER,
+
+-- Timing (aligned with schema timestamp standards)
+submitted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+expires_at TIMESTAMP WITH TIME ZONE,
+processed_at TIMESTAMP WITH TIME ZONE,
+assignment_effective_date DATE,
+
+-- Approval and assignment (aligned with approval workflow standards)
+approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+approved_at TIMESTAMP WITH TIME ZONE,
+rejection_reason TEXT,
+assignment_status scheduling.bidding_assignment_status_enum,
+shift_assignment_id UUID REFERENCES scheduling.shift_assignments(assignment_id) ON DELETE SET NULL,
+
+-- Bidding rules (aligned with optimization rules schema)
+bidding_rule_applied VARCHAR(50),
+rule_parameters JSONB DEFAULT '{}'::jsonb,
+optimization_rule_id UUID REFERENCES scheduling.staffing_optimization_rules(rule_id) ON DELETE SET NULL,
+
+-- Fairness metrics (aligned with performance metrics schema)
+seniority_factor NUMERIC(5,2) DEFAULT 0.5 CHECK (seniority_factor BETWEEN 0 AND 1),
+performance_factor NUMERIC(5,2) DEFAULT 0.5 CHECK (performance_factor BETWEEN 0 AND 1),
+fairness_score NUMERIC(5,2) CHECK (fairness_score BETWEEN 0 AND 100),
+seniority_years NUMERIC(5,2),
+performance_score NUMERIC(5,2),
+
+-- Bid information
+bid_notes TEXT,
+manager_notes TEXT,
+employee_comments TEXT,
+
+-- Conflict detection
+has_scheduling_conflict BOOLEAN NOT NULL DEFAULT FALSE,
+conflict_details JSONB,
+conflict_resolution VARCHAR(50)
+CHECK (conflict_resolution IN ('RESOLVED', 'UNRESOLVED', 'OVERRIDDEN', 'WITHDRAWN')),
+
+-- Audit columns (aligned with schema standards)
+created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+updated_by UUID REFERENCES hr.employees(employee_id),
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+-- System metadata (aligned with schema standards)
+metadata JSONB DEFAULT '{}'::jsonb,
+tags TEXT[] DEFAULT '{}',
+
+-- Constraints
+CONSTRAINT chk_bidding_timing CHECK (
+expires_at IS NULL OR expires_at > submitted_at
+),
+CONSTRAINT chk_bid_approval CHECK (
+(bid_status IN ('APPROVED', 'ASSIGNED') AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR
+(bid_status NOT IN ('APPROVED', 'ASSIGNED') AND (approved_by IS NULL OR approved_at IS NULL))
+),
+CONSTRAINT chk_bid_processing CHECK (
+(processed_at IS NULL AND assignment_status IS NULL) OR
+(processed_at IS NOT NULL AND assignment_status IS NOT NULL)
+),
+CONSTRAINT chk_bid_assignment CHECK (
+(assignment_status = 'ASSIGNED' AND shift_assignment_id IS NOT NULL) OR
+(assignment_status != 'ASSIGNED' AND shift_assignment_id IS NULL)
+),
+-- CONSTRAINT chk_bid_points CHECK (
+-- (bid_type IN ('POINTS', 'MIXED') AND bid_points_used > 0) OR
+-- (bid_type NOT IN ('POINTS', 'MIXED') AND bid_points_used = 0)
+-- ),
+CONSTRAINT chk_unique_employee_shift_bid UNIQUE(employee_id, shift_id, bidding_round_id)
+DEFERRABLE INITIALLY DEFERRED
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with schema indexing strategy)
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_employee
+ON scheduling.shift_bidding(employee_id, submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_shift
+ON scheduling.shift_bidding(shift_id, bid_status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_round
+ON scheduling.shift_bidding(bidding_round_id, bid_priority DESC)
+WHERE bidding_round_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_schedule
+ON scheduling.shift_bidding(schedule_id)
+WHERE schedule_id IS NOT NULL;
+
+-- Status and timing indexes
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_status
+ON scheduling.shift_bidding(bid_status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_pending
+ON scheduling.shift_bidding(submitted_at)
+WHERE bid_status IN ('SUBMITTED', 'PENDING');
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_expiring
+ON scheduling.shift_bidding(expires_at)
+WHERE expires_at IS NOT NULL
+AND bid_status IN ('SUBMITTED', 'PENDING');
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_approved
+ON scheduling.shift_bidding(approved_at)
+WHERE approved_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_processed
+ON scheduling.shift_bidding(processed_at DESC)
+WHERE processed_at IS NOT NULL;
+
+-- Type and priority indexes
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_type
+ON scheduling.shift_bidding(bid_type, bid_status);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_priority
+ON scheduling.shift_bidding(bid_priority DESC, submitted_at);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_score
+ON scheduling.shift_bidding(fairness_score DESC, bid_preference_score DESC);
+
+-- Assignment tracking indexes
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_assignment
+ON scheduling.shift_bidding(shift_assignment_id)
+WHERE shift_assignment_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_assignment_status
+ON scheduling.shift_bidding(assignment_status, processed_at)
+WHERE assignment_status IS NOT NULL;
+
+-- Conflict tracking indexes
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_conflicts
+ON scheduling.shift_bidding(has_scheduling_conflict)
+WHERE has_scheduling_conflict = TRUE;
+
+-- JSONB and array indexes (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_metadata
+ON scheduling.shift_bidding USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_tags
+ON scheduling.shift_bidding USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_rule_params
+ON scheduling.shift_bidding USING GIN(rule_parameters);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_conflict_details
+ON scheduling.shift_bidding USING GIN(conflict_details)
+WHERE conflict_details IS NOT NULL;
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_employee_status
+ON scheduling.shift_bidding(employee_id, bid_status, submitted_at);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_round_status
+ON scheduling.shift_bidding(bidding_round_id, bid_status, bid_priority)
+WHERE bidding_round_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_shift_status
+ON scheduling.shift_bidding(shift_id, bid_status, bid_priority);
+
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_type_status_date
+ON scheduling.shift_bidding(bid_type, bid_status, submitted_at DESC);
+
+-- BRIN index for time-series data (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_shift_bidding_time_brin
+ON scheduling.shift_bidding USING BRIN(submitted_at, processed_at);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION (Aligned with schema standards)
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_shift_bidding_updated_at ON scheduling.shift_bidding;
+CREATE TRIGGER trg_shift_bidding_updated_at
+BEFORE UPDATE ON scheduling.shift_bidding
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate bid code
+CREATE OR REPLACE FUNCTION scheduling.generate_bid_code()
+RETURNS TRIGGER AS $$
+DECLARE
+v_employee_code VARCHAR(20);
+v_sequence_number INTEGER;
+v_date_suffix VARCHAR(8);
+BEGIN
+IF NEW.bid_code IS NULL THEN
+-- Get employee code if available
+SELECT employee_code INTO v_employee_code
+FROM hr.employees
+WHERE employee_id = NEW.employee_id;
+
+-- Generate date suffix
+v_date_suffix := TO_CHAR(CURRENT_DATE, 'YYYYMMDD');
+
+-- Generate sequence number for today
+SELECT COALESCE(MAX(CAST(SUBSTRING(bid_code FROM 13) AS INTEGER)), 0) + 1
+INTO v_sequence_number
+FROM scheduling.shift_bidding
+WHERE bid_code LIKE 'BID-%-' || v_date_suffix || '-%';
+
+-- Format bid code: BID-EMP-YYYYMMDD-###
+IF v_employee_code IS NOT NULL THEN
+NEW.bid_code := 'BID-' || SUBSTRING(v_employee_code FROM 1 FOR 3) || '-' ||
+v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+ELSE
+NEW.bid_code := 'BID-SYS-' || v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+END IF;
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_shift_bidding_code ON scheduling.shift_bidding;
+CREATE TRIGGER trg_shift_bidding_code
+BEFORE INSERT ON scheduling.shift_bidding
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_bid_code();
+
+-- Trigger to validate bidding workflow
+CREATE OR REPLACE FUNCTION scheduling.validate_bidding_workflow()
+RETURNS TRIGGER AS $$
+BEGIN
+-- Auto-update status based on timestamps
+IF NEW.approved_at IS NOT NULL AND OLD.approved_at IS NULL THEN
+NEW.bid_status := 'APPROVED';
+END IF;
+
+IF NEW.processed_at IS NOT NULL AND OLD.processed_at IS NULL THEN
+IF NEW.assignment_status IS NULL THEN
+NEW.assignment_status := 'NOT_ASSIGNED';
+END IF;
+END IF;
+
+-- Auto-expire bids
+IF NEW.expires_at IS NOT NULL
+AND NEW.expires_at < CURRENT_TIMESTAMP
+AND NEW.bid_status IN ('SUBMITTED', 'PENDING') THEN
+NEW.bid_status := 'EXPIRED';
+END IF;
+
+-- Validate assignment linkage
+IF NEW.assignment_status = 'ASSIGNED' AND NEW.shift_assignment_id IS NULL THEN
+RAISE EXCEPTION 'Assigned bids must have shift_assignment_id';
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_shift_bidding_workflow ON scheduling.shift_bidding;
+CREATE TRIGGER trg_shift_bidding_workflow
+BEFORE UPDATE ON scheduling.shift_bidding
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_bidding_workflow();
+
+-- Trigger to check for scheduling conflicts
+CREATE OR REPLACE FUNCTION scheduling.check_bid_conflicts()
+RETURNS TRIGGER AS $$
+DECLARE
+v_conflict_count INTEGER;
+BEGIN
+-- Check for overlapping shift assignments
+SELECT COUNT(*) INTO v_conflict_count
+FROM scheduling.shift_assignments sa
+JOIN scheduling.shifts s ON sa.shift_id = s.shift_id
+WHERE sa.employee_id = NEW.employee_id
+AND sa.assignment_status NOT IN ('CANCELLED', 'NO_SHOW', 'EXCUSED_ABSENCE')
+AND tsrange(s.start_time, s.end_time) && (
+SELECT tsrange(start_time, end_time)
+FROM scheduling.shifts
+WHERE shift_id = NEW.shift_id
+);
+
+IF v_conflict_count > 0 THEN
+NEW.has_scheduling_conflict := TRUE;
+NEW.conflict_details := jsonb_build_object(
+'conflicting_assignments', v_conflict_count,
+'detected_at', CURRENT_TIMESTAMP
+);
+END IF;
+
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_shift_bidding_conflicts ON scheduling.shift_bidding;
+CREATE TRIGGER trg_shift_bidding_conflicts
+BEFORE INSERT OR UPDATE OF employee_id, shift_id ON scheduling.shift_bidding
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.check_bid_conflicts();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION (Aligned with schema standards)
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.shift_bidding IS
+'Manages shift bidding processes for fair and transparent employee shift selection.
+Enables employee autonomy in shift selection while maintaining business needs through
+configurable bidding rules, prioritization algorithms, and fairness metrics. Integrates
+with shift_assignments for seamless bid-to-assignment workflow. Supports multiple
+bidding methods including seniority-based, points-based, and performance-based bidding.
+Provides comprehensive audit trail for compliance and fairness verification.';
+
+COMMENT ON COLUMN scheduling.shift_bidding.bid_id IS 'Unique identifier for the bid (UUID)';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_code IS 'Business-readable bid code (format: BID-XXX-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.shift_bidding.shift_id IS 'Reference to the shift being bid on';
+COMMENT ON COLUMN scheduling.shift_bidding.employee_id IS 'Employee submitting the bid';
+COMMENT ON COLUMN scheduling.shift_bidding.bidding_round_id IS 'Reference to bidding round (if applicable)';
+COMMENT ON COLUMN scheduling.shift_bidding.schedule_id IS 'Reference to parent schedule';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_type IS 'Type of bid (PREFERENCE, REQUEST, OFFER, SWAP, BID, CLAIM)';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_status IS 'Current status in bidding workflow';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_priority IS 'Priority ranking for bid (1-10, higher = more important)';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_points_used IS 'Points consumed for this bid (for points-based bidding)';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_preference_score IS 'Employee preference score for this shift (0-100)';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_ranking IS 'Ranking of bid among all bids for this shift';
+COMMENT ON COLUMN scheduling.shift_bidding.submitted_at IS 'Timestamp when bid was submitted';
+COMMENT ON COLUMN scheduling.shift_bidding.expires_at IS 'Timestamp when bid expires if not processed';
+COMMENT ON COLUMN scheduling.shift_bidding.processed_at IS 'Timestamp when bid was processed';
+COMMENT ON COLUMN scheduling.shift_bidding.assignment_effective_date IS 'Date when assignment becomes effective';
+COMMENT ON COLUMN scheduling.shift_bidding.approved_by IS 'Employee who approved the bid';
+COMMENT ON COLUMN scheduling.shift_bidding.approved_at IS 'Timestamp when bid was approved';
+COMMENT ON COLUMN scheduling.shift_bidding.rejection_reason IS 'Reason for bid rejection';
+COMMENT ON COLUMN scheduling.shift_bidding.assignment_status IS 'Result of bid processing (ASSIGNED, NOT_ASSIGNED, WAITLISTED)';
+COMMENT ON COLUMN scheduling.shift_bidding.shift_assignment_id IS 'Reference to resulting shift assignment';
+COMMENT ON COLUMN scheduling.shift_bidding.bidding_rule_applied IS 'Name of bidding rule applied to this bid';
+COMMENT ON COLUMN scheduling.shift_bidding.rule_parameters IS 'JSONB parameters for applied bidding rule';
+COMMENT ON COLUMN scheduling.shift_bidding.optimization_rule_id IS 'Reference to optimization rule used';
+COMMENT ON COLUMN scheduling.shift_bidding.seniority_factor IS 'Seniority weight factor (0-1)';
+COMMENT ON COLUMN scheduling.shift_bidding.performance_factor IS 'Performance weight factor (0-1)';
+COMMENT ON COLUMN scheduling.shift_bidding.fairness_score IS 'Overall fairness score for this bid (0-100)';
+COMMENT ON COLUMN scheduling.shift_bidding.seniority_years IS 'Employee seniority in years at time of bid';
+COMMENT ON COLUMN scheduling.shift_bidding.performance_score IS 'Employee performance score at time of bid';
+COMMENT ON COLUMN scheduling.shift_bidding.bid_notes IS 'Notes from employee with bid';
+COMMENT ON COLUMN scheduling.shift_bidding.manager_notes IS 'Notes from manager during review';
+COMMENT ON COLUMN scheduling.shift_bidding.employee_comments IS 'Additional comments from employee';
+COMMENT ON COLUMN scheduling.shift_bidding.has_scheduling_conflict IS 'Indicates if bid has scheduling conflicts';
+COMMENT ON COLUMN scheduling.shift_bidding.conflict_details IS 'JSONB details of scheduling conflicts';
+COMMENT ON COLUMN scheduling.shift_bidding.conflict_resolution IS 'Status of conflict resolution';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- View for active bidding rounds
+CREATE OR REPLACE VIEW scheduling.vw_active_bidding_rounds AS
+SELECT
+br.round_id,
+br.round_code,
+br.round_name,
+br.schedule_id,
+s.schedule_code,
+br.department_id,
+d.department_name,
+br.location_id,
+l.location_name,
+br.start_date,
+br.end_date,
+br.processing_date,
+br.bidding_method,
+br.status,
+br.total_bids,
+br.approved_bids,
+br.rejected_bids,
+br.fulfillment_rate,
+EXTRACT(EPOCH FROM (br.end_date - CURRENT_TIMESTAMP)) / 3600 AS hours_remaining,
+CASE
+WHEN br.status = 'ACTIVE' AND br.end_date < CURRENT_TIMESTAMP + INTERVAL '24 hours'
+THEN 'ENDING_SOON'
+WHEN br.status = 'ACTIVE' THEN 'ACTIVE'
+WHEN br.status = 'PROCESSING' THEN 'PROCESSING'
+ELSE 'INACTIVE'
+END AS round_urgency
+FROM scheduling.bidding_rounds br
+LEFT JOIN scheduling.schedules s ON br.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON br.department_id = d.department_id
+LEFT JOIN operations.locations l ON br.location_id = l.location_id
+WHERE br.status IN ('ACTIVE', 'PROCESSING')
+ORDER BY br.end_date ASC;
+
+COMMENT ON VIEW scheduling.vw_active_bidding_rounds IS
+'Active bidding rounds with urgency indicators and progress metrics';
+
+-- View for employee bidding summary
+CREATE OR REPLACE VIEW scheduling.vw_employee_bidding_summary AS
+SELECT
+e.employee_id,
+e.employee_code,
+e.first_name,
+e.last_name,
+e.department_id,
+d.department_name,
+COUNT(sb.bid_id) AS total_bids,
+COUNT(CASE WHEN sb.bid_status = 'APPROVED' THEN 1 END) AS approved_bids,
+COUNT(CASE WHEN sb.bid_status = 'REJECTED' THEN 1 END) AS rejected_bids,
+COUNT(CASE WHEN sb.bid_status = 'PENDING' THEN 1 END) AS pending_bids,
+COUNT(CASE WHEN sb.assignment_status = 'ASSIGNED' THEN 1 END) AS assigned_bids,
+ROUND(
+COUNT(CASE WHEN sb.bid_status = 'APPROVED' THEN 1 END)::NUMERIC /
+NULLIF(COUNT(sb.bid_id), 0) * 100, 2
+) AS approval_rate,
+SUM(sb.bid_points_used) AS total_points_used,
+AVG(sb.fairness_score) AS avg_fairness_score,
+MAX(sb.submitted_at) AS last_bid_date
+FROM hr.employees e
+LEFT JOIN scheduling.shift_bidding sb ON e.employee_id = sb.employee_id
+LEFT JOIN hr.departments d ON e.department_id = d.department_id
+WHERE e.employment_status IN ('ACTIVE', 'PROBATION')
+GROUP BY e.employee_id, e.employee_code, e.first_name, e.last_name,
+e.department_id, d.department_name
+ORDER BY total_bids DESC;
+
+COMMENT ON VIEW scheduling.vw_employee_bidding_summary IS
+'Employee bidding activity summary with approval rates and fairness metrics';
+
+-- View for bidding round analytics
+CREATE OR REPLACE VIEW scheduling.vw_bidding_round_analytics AS
+SELECT
+br.round_id,
+br.round_code,
+br.round_name,
+br.bidding_method,
+br.start_date,
+br.end_date,
+br.status,
+COUNT(sb.bid_id) AS total_bids,
+COUNT(DISTINCT sb.employee_id) AS participating_employees,
+COUNT(CASE WHEN sb.bid_status = 'APPROVED' THEN 1 END) AS approved_bids,
+COUNT(CASE WHEN sb.bid_status = 'REJECTED' THEN 1 END) AS rejected_bids,
+COUNT(CASE WHEN sb.bid_status = 'EXPIRED' THEN 1 END) AS expired_bids,
+COUNT(CASE WHEN sb.assignment_status = 'ASSIGNED' THEN 1 END) AS assigned_bids,
+COUNT(CASE WHEN sb.has_scheduling_conflict = TRUE THEN 1 END) AS conflicting_bids,
+ROUND(
+COUNT(CASE WHEN sb.bid_status = 'APPROVED' THEN 1 END)::NUMERIC /
+NULLIF(COUNT(sb.bid_id), 0) * 100, 2
+) AS approval_rate,
+ROUND(
+COUNT(CASE WHEN sb.assignment_status = 'ASSIGNED' THEN 1 END)::NUMERIC /
+NULLIF(COUNT(sb.bid_id), 0) * 100, 2
+) AS fulfillment_rate,
+AVG(sb.fairness_score) AS avg_fairness_score,
+AVG(sb.bid_preference_score) AS avg_preference_score,
+AVG(sb.seniority_factor) AS avg_seniority_factor,
+AVG(sb.performance_factor) AS avg_performance_factor,
+EXTRACT(EPOCH FROM (AVG(sb.processed_at - sb.submitted_at))) / 3600 AS avg_processing_hours
+FROM scheduling.bidding_rounds br
+LEFT JOIN scheduling.shift_bidding sb ON br.round_id = sb.bidding_round_id
+GROUP BY br.round_id, br.round_code, br.round_name, br.bidding_method,
+br.start_date, br.end_date, br.status
+ORDER BY br.start_date DESC;
+
+COMMENT ON VIEW scheduling.vw_bidding_round_analytics IS
+'Comprehensive analytics for bidding rounds including participation, approval rates, and fairness metrics';
+
+-- View for pending bids requiring attention
+CREATE OR REPLACE VIEW scheduling.vw_pending_bids AS
+SELECT
+sb.bid_id,
+sb.bid_code,
+sb.employee_id,
+e.first_name || ' ' || e.last_name AS employee_name,
+e.employee_code,
+sb.shift_id,
+sh.start_time,
+sh.end_time,
+sb.bid_type,
+sb.bid_status,
+sb.bid_priority,
+sb.submitted_at,
+sb.expires_at,
+EXTRACT(EPOCH FROM (sb.expires_at - CURRENT_TIMESTAMP)) / 3600 AS hours_until_expiry,
+sb.has_scheduling_conflict,
+sb.fairness_score,
+d.department_name,
+l.location_name,
+CASE
+WHEN sb.expires_at < CURRENT_TIMESTAMP + INTERVAL '2 hours' THEN 'URGENT'
+WHEN sb.expires_at < CURRENT_TIMESTAMP + INTERVAL '24 hours' THEN 'HIGH'
+WHEN sb.bid_priority >= 8 THEN 'MEDIUM'
+ELSE 'NORMAL'
+END AS processing_priority
+FROM scheduling.shift_bidding sb
+JOIN hr.employees e ON sb.employee_id = e.employee_id
+JOIN scheduling.shifts sh ON sb.shift_id = sh.shift_id
+LEFT JOIN hr.departments d ON sh.department_id = d.department_id
+LEFT JOIN operations.locations l ON sh.location_id = l.location_id
+WHERE sb.bid_status IN ('SUBMITTED', 'PENDING')
+AND (sb.expires_at IS NULL OR sb.expires_at > CURRENT_TIMESTAMP)
+ORDER BY
+CASE
+WHEN sb.expires_at < CURRENT_TIMESTAMP + INTERVAL '2 hours' THEN 1
+WHEN sb.expires_at < CURRENT_TIMESTAMP + INTERVAL '24 hours' THEN 2
+WHEN sb.bid_priority >= 8 THEN 3
+ELSE 4
+END,
+sb.submitted_at ASC;
+
+COMMENT ON VIEW scheduling.vw_pending_bids IS
+'Pending bids requiring manager attention, prioritized by urgency and bid priority';
+
+-- =============================================================================
+-- PERMISSION GRANTS (Aligned with schema standards)
+-- =============================================================================
+
+-- -- Grant SELECT to reporting and management roles
+-- GRANT SELECT ON scheduling.shift_bidding TO reporting_role;
+-- GRANT SELECT ON scheduling.shift_bidding TO manager_role;
+-- GRANT SELECT ON scheduling.shift_bidding TO admin_role;
+-- GRANT SELECT ON scheduling.shift_bidding TO hr_role;
+
+-- -- Grant INSERT, UPDATE to appropriate roles
+-- GRANT INSERT, UPDATE ON scheduling.shift_bidding TO admin_role;
+-- GRANT INSERT, UPDATE ON scheduling.shift_bidding TO hr_role;
+-- GRANT INSERT ON scheduling.shift_bidding TO manager_role;
+-- GRANT UPDATE (bid_status, approved_by, approved_at, rejection_reason, assignment_status, shift_assignment_id, manager_notes)
+-- ON scheduling.shift_bidding TO manager_role;
+
+-- -- Grant DELETE to admin only
+-- GRANT DELETE ON scheduling.shift_bidding TO admin_role;
+
+-- -- Grant on bidding_rounds
+-- GRANT SELECT ON scheduling.bidding_rounds TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.bidding_rounds TO admin_role, hr_role;
+-- GRANT DELETE ON scheduling.bidding_rounds TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_active_bidding_rounds TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT SELECT ON scheduling.vw_employee_bidding_summary TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT SELECT ON scheduling.vw_bidding_round_analytics TO reporting_role, manager_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_pending_bids TO manager_role, admin_role, hr_role;
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES (Aligned with schema standards)
+-- =============================================================================
+
+-- Procedure to process expired bids
+CREATE OR REPLACE PROCEDURE scheduling.process_expired_bids(
+p_batch_size INTEGER DEFAULT 100
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+v_processed_count INTEGER;
+BEGIN
+-- Update expired bids
+WITH expired AS (
+UPDATE scheduling.shift_bidding
+SET bid_status = 'EXPIRED',
+updated_at = CURRENT_TIMESTAMP
+WHERE bid_id IN (
+SELECT bid_id
+FROM scheduling.shift_bidding
+WHERE expires_at < CURRENT_TIMESTAMP
+AND bid_status IN ('SUBMITTED', 'PENDING')
+LIMIT p_batch_size
+)
+RETURNING *
+)
+SELECT COUNT(*) INTO v_processed_count FROM expired;
+
+RAISE NOTICE 'Processed % expired bids', v_processed_count;
+
+-- Log the operation
+INSERT INTO system.maintenance_logs (
+log_type,
+component,
+message,
+started_at,
+completed_at,
+status,
+metadata
+) VALUES (
+'BID_PROCESSING',
+'scheduling.process_expired_bids',
+format('Processed %s expired bids', v_processed_count),
+CURRENT_TIMESTAMP,
+CURRENT_TIMESTAMP,
+'SUCCESS',
+jsonb_build_object('processed_count', v_processed_count)
+);
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.process_expired_bids IS
+'Processes expired bids and updates their status';
+
+-- Procedure to auto-assign bids based on rules
+CREATE OR REPLACE PROCEDURE scheduling.auto_assign_bids(
+p_round_id UUID DEFAULT NULL,
+p_batch_size INTEGER DEFAULT 50
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+v_assigned_count INTEGER;
+BEGIN
+-- Auto-assign approved bids without conflicts
+WITH assigned AS (
+UPDATE scheduling.shift_bidding sb
+SET assignment_status = 'ASSIGNED',
+processed_at = CURRENT_TIMESTAMP,
+updated_at = CURRENT_TIMESTAMP
+WHERE bid_id IN (
+SELECT bid_id
+FROM scheduling.shift_bidding
+WHERE bid_status = 'APPROVED'
+AND assignment_status IS NULL
+AND has_scheduling_conflict = FALSE
+AND (p_round_id IS NULL OR bidding_round_id = p_round_id)
+LIMIT p_batch_size
+)
+RETURNING *
+)
+SELECT COUNT(*) INTO v_assigned_count FROM assigned;
+
+RAISE NOTICE 'Auto-assigned % bids', v_assigned_count;
+
+-- Log the operation
+INSERT INTO system.maintenance_logs (
+log_type,
+component,
+message,
+started_at,
+completed_at,
+status,
+metadata
+) VALUES (
+'BID_ASSIGNMENT',
+'scheduling.auto_assign_bids',
+format('Auto-assigned %s bids', v_assigned_count),
+CURRENT_TIMESTAMP,
+CURRENT_TIMESTAMP,
+'SUCCESS',
+jsonb_build_object('assigned_count', v_assigned_count, 'round_id', p_round_id)
+);
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.auto_assign_bids IS
+'Auto-assigns approved bids without scheduling conflicts';
+
+-- -- Grant execute permissions
+-- GRANT EXECUTE ON PROCEDURE scheduling.process_expired_bids TO admin_role, scheduler_role;
+-- GRANT EXECUTE ON PROCEDURE scheduling.auto_assign_bids TO admin_role, scheduler_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES (Aligned with schema standards)
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema
+FROM information_schema.tables
+WHERE table_name = 'shift_bidding'
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'shift_bidding'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'shift_bidding'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'shift_bidding';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.shift_bidding'::regclass
+ORDER BY conname;
+
+-- Verify enum types
+SELECT
+typname AS enum_name,
+pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN ('bid_type_enum', 'bid_status_enum', 'bidding_assignment_status_enum')
+AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'scheduling')
+GROUP BY typname;
+
+-- Test query
+SELECT
+bid_code,
+employee_id,
+shift_id,
+bid_type,
+bid_status,
+bid_priority,
+fairness_score,
+submitted_at,
+assignment_status
+FROM scheduling.shift_bidding
+WHERE bid_status IN ('SUBMITTED', 'PENDING')
+ORDER BY submitted_at DESC
+LIMIT 10;
+
+-- =============================================================================
+-- Serial No: 36 | TABLE: scheduling.workforce_forecast
+-- =============================================================================
+-- Description: Stores workforce demand forecasts for strategic planning
+-- Business Case: Enables data-driven workforce planning by storing detailed demand 
+--                forecasts. Supports capacity planning, hiring decisions, and 
+--                budget forecasting. Integrates with scheduling systems to align 
+--                staffing with predicted demand.
+-- KPI: Forecast accuracy (>85%), Forecast utilization rate (>90%), 
+--      Planning cycle time reduction (>40%), Cost savings from optimal staffing (>20%)
+-- Feature Reference: F-FORECAST-001, F-PLAN-001, F-BUDGET-001, F-ANA-010
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.workforce_forecast (
+    -- Primary identifiers
+    forecast_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    forecast_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (forecast_code ~ '^WFC-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+
+    -- Forecast context (using existing schema tables)
+    location_id UUID NOT NULL REFERENCES operations.locations(location_id) ON DELETE CASCADE,
+    department_id UUID REFERENCES hr.departments(department_id) ON DELETE SET NULL,
+    position_id UUID REFERENCES hr.positions(position_id) ON DELETE SET NULL,
+
+    -- Forecast period
+    forecast_date DATE NOT NULL,
+    forecast_period VARCHAR(20) NOT NULL
+        CHECK (forecast_period IN ('HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    forecast_horizon VARCHAR(20) NOT NULL
+        CHECK (forecast_horizon IN ('SHORT_TERM', 'MEDIUM_TERM', 'LONG_TERM', 'STRATEGIC')),
+
+    -- Demand metrics
+    expected_demand NUMERIC(10,2) NOT NULL CHECK (expected_demand >= 0),
+    minimum_staffing INTEGER CHECK (minimum_staffing >= 0),
+    optimal_staffing INTEGER CHECK (optimal_staffing >= 0),
+    maximum_staffing INTEGER CHECK (maximum_staffing >= 0),
+
+    -- Forecast details
+    forecast_method VARCHAR(50) NOT NULL
+        CHECK (forecast_method IN ('HISTORICAL', 'TREND', 'SEASONAL', 'MACHINE_LEARNING',
+                                  'MANUAL', 'COMBINED', 'EXTERNAL_DATA', 'HYBRID')),
+    confidence_level NUMERIC(5,2) NOT NULL CHECK (confidence_level BETWEEN 0 AND 100),
+    forecast_variance NUMERIC(10,2) CHECK (forecast_variance >= 0),
+    prediction_interval_low NUMERIC(10,2),
+    prediction_interval_high NUMERIC(10,2),
+
+    -- External factors
+    external_factors JSONB DEFAULT '{}'::jsonb,
+    adjustment_factors JSONB DEFAULT '{}'::jsonb,
+    data_sources TEXT[] DEFAULT '{}',
+
+    -- Comparison with actuals (populated post-period)
+    actual_demand NUMERIC(10,2) CHECK (actual_demand >= 0),
+    actual_staffing INTEGER CHECK (actual_staffing >= 0),
+    forecast_error NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE WHEN actual_demand IS NOT NULL AND expected_demand IS NOT NULL 
+        THEN actual_demand - expected_demand ELSE NULL END
+    ) STORED,
+    forecast_accuracy NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN actual_demand > 0 AND expected_demand > 0
+            THEN GREATEST(0, (1 - ABS((actual_demand - expected_demand) / actual_demand)) * 100)
+            ELSE NULL
+        END
+    ) STORED,
+    mape NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN actual_demand > 0 AND expected_demand > 0
+            THEN ABS((actual_demand - expected_demand) / actual_demand) * 100
+            ELSE NULL
+        END
+    ) STORED,
+
+    -- Status and validation
+    status VARCHAR(20) NOT NULL DEFAULT 'DRAFT'
+        CHECK (status IN ('DRAFT', 'SUBMITTED', 'REVIEW', 'APPROVED', 'PUBLISHED', 'ARCHIVED', 'SUPERSEDED')),
+    validated_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    validated_at TIMESTAMP WITH TIME ZONE,
+    approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    published_at TIMESTAMP WITH TIME ZONE,
+
+    -- Version control
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    previous_version_id UUID REFERENCES scheduling.workforce_forecast(forecast_id) ON DELETE SET NULL,
+    is_current_version BOOLEAN NOT NULL DEFAULT TRUE,
+
+    -- Usage tracking
+    used_in_planning BOOLEAN NOT NULL DEFAULT FALSE,
+    planning_impact VARCHAR(20) CHECK (planning_impact IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+    linked_schedule_ids UUID[] DEFAULT '{}',
+
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+
+    -- Constraints
+    CONSTRAINT chk_staffing_levels CHECK (
+        minimum_staffing IS NULL OR optimal_staffing IS NULL OR maximum_staffing IS NULL OR
+        (minimum_staffing <= optimal_staffing AND optimal_staffing <= maximum_staffing)
+    ),
+    CONSTRAINT chk_forecast_validation CHECK (
+        (status IN ('APPROVED', 'PUBLISHED') AND validated_at IS NOT NULL) OR
+        (status NOT IN ('APPROVED', 'PUBLISHED'))
+    ),
+    CONSTRAINT chk_actuals_tracking CHECK (
+        (actual_demand IS NULL AND actual_staffing IS NULL) OR
+        (actual_demand IS NOT NULL AND actual_staffing IS NOT NULL)
+    ),
+    CONSTRAINT chk_prediction_interval CHECK (
+        (prediction_interval_low IS NULL AND prediction_interval_high IS NULL) OR
+        (prediction_interval_low IS NOT NULL AND prediction_interval_high IS NOT NULL 
+         AND prediction_interval_low <= expected_demand AND expected_demand <= prediction_interval_high)
+    ),
+    CONSTRAINT chk_version_consistency CHECK (
+        (previous_version_id IS NULL AND version = 1) OR
+        (previous_version_id IS NOT NULL AND version > 1)
+    )
+);
+
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_location_date
+ON scheduling.workforce_forecast(location_id, forecast_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_department_date
+ON scheduling.workforce_forecast(department_id, forecast_date DESC)
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_position_date
+ON scheduling.workforce_forecast(position_id, forecast_date DESC)
+WHERE position_id IS NOT NULL;
+
+-- Period and horizon indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_period_horizon
+ON scheduling.workforce_forecast(forecast_period, forecast_horizon, forecast_date DESC);
+
+-- Status and workflow indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_status_date
+ON scheduling.workforce_forecast(status, forecast_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_published
+ON scheduling.workforce_forecast(published_at DESC)
+WHERE published_at IS NOT NULL;
+
+-- Accuracy and performance indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_accuracy
+ON scheduling.workforce_forecast(forecast_accuracy DESC NULLS LAST)
+WHERE actual_demand IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_confidence
+ON scheduling.workforce_forecast(confidence_level DESC, forecast_date DESC);
+
+-- Method and version indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_method
+ON scheduling.workforce_forecast(forecast_method, forecast_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_current
+ON scheduling.workforce_forecast(is_current_version) WHERE is_current_version = TRUE;
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_external_factors
+ON scheduling.workforce_forecast USING GIN(external_factors);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_adjustment_factors
+ON scheduling.workforce_forecast USING GIN(adjustment_factors);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_linked_schedules
+ON scheduling.workforce_forecast USING GIN(linked_schedule_ids);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_metadata
+ON scheduling.workforce_forecast USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_tags
+ON scheduling.workforce_forecast USING GIN(tags);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_location_period_status
+ON scheduling.workforce_forecast(location_id, forecast_period, status, forecast_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workforce_forecast_accuracy_filter
+ON scheduling.workforce_forecast(forecast_accuracy, forecast_date)
+WHERE forecast_accuracy IS NOT NULL AND status = 'PUBLISHED';
+
+
+-- Trigger for updated_at timestamp
+DROP TRIGGER IF EXISTS trg_workforce_forecast_updated_at ON scheduling.workforce_forecast;
+CREATE TRIGGER trg_workforce_forecast_updated_at
+BEFORE UPDATE ON scheduling.workforce_forecast
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate forecast code
+CREATE OR REPLACE FUNCTION scheduling.generate_forecast_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_location_code VARCHAR(10);
+    v_sequence_number INTEGER;
+BEGIN
+    IF NEW.forecast_code IS NULL THEN
+        -- Get location code
+        SELECT location_code INTO v_location_code
+        FROM operations.locations
+        WHERE location_id = NEW.location_id;
+        
+        -- Generate sequence number
+        SELECT COALESCE(MAX(CAST(SUBSTRING(forecast_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.workforce_forecast
+        WHERE location_id = NEW.location_id
+        AND forecast_date = NEW.forecast_date
+        AND forecast_period = NEW.forecast_period;
+        
+        -- Format: WFC-LOC-YYYYMMDD-###
+        NEW.forecast_code := 'WFC-' || COALESCE(v_location_code, 'DEF') || '-' || 
+                            TO_CHAR(NEW.forecast_date, 'YYYYMMDD') || '-' ||
+                            LPAD(v_sequence_number::TEXT, 3, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_workforce_forecast_code ON scheduling.workforce_forecast;
+CREATE TRIGGER trg_workforce_forecast_code
+BEFORE INSERT ON scheduling.workforce_forecast
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_forecast_code();
+
+-- Trigger to manage versioning
+CREATE OR REPLACE FUNCTION scheduling.manage_forecast_versioning()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- When a forecast is updated with status change to SUPERSEDED, mark previous as not current
+    IF TG_OP = 'UPDATE' AND NEW.status = 'SUPERSEDED' AND OLD.status != 'SUPERSEDED' THEN
+        -- Mark this version as not current
+        NEW.is_current_version := FALSE;
+    END IF;
+    
+    -- When inserting a new version, mark previous versions as not current
+    IF TG_OP = 'INSERT' AND NEW.previous_version_id IS NOT NULL THEN
+        UPDATE scheduling.workforce_forecast
+        SET is_current_version = FALSE,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE forecast_id = NEW.previous_version_id;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_workforce_forecast_versioning ON scheduling.workforce_forecast;
+CREATE TRIGGER trg_workforce_forecast_versioning
+BEFORE INSERT OR UPDATE OF status, previous_version_id 
+ON scheduling.workforce_forecast
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.manage_forecast_versioning();
+
+
+-- View: Forecast accuracy dashboard
+CREATE OR REPLACE VIEW scheduling.v_forecast_accuracy_dashboard AS
+SELECT
+    wf.forecast_id,
+    wf.forecast_code,
+    wf.forecast_date,
+    wf.forecast_period,
+    wf.forecast_horizon,
+    l.location_name,
+    d.department_name,
+    p.position_title,
+    wf.expected_demand,
+    wf.actual_demand,
+    wf.forecast_error,
+    wf.forecast_accuracy,
+    wf.mape,
+    wf.confidence_level,
+    wf.forecast_method,
+    wf.status,
+    wf.published_at,
+    -- Accuracy categorization
+    CASE
+        WHEN wf.forecast_accuracy >= 95 THEN 'EXCELLENT'
+        WHEN wf.forecast_accuracy >= 85 THEN 'GOOD'
+        WHEN wf.forecast_accuracy >= 70 THEN 'ACCEPTABLE'
+        WHEN wf.forecast_accuracy >= 50 THEN 'NEEDS_IMPROVEMENT'
+        ELSE 'POOR'
+    END AS accuracy_category,
+    -- Trend indicator (requires window function)
+    LAG(wf.forecast_accuracy) OVER (
+        PARTITION BY wf.location_id, wf.forecast_period 
+        ORDER BY wf.forecast_date
+    ) AS previous_accuracy,
+    wf.forecast_accuracy - LAG(wf.forecast_accuracy) OVER (
+        PARTITION BY wf.location_id, wf.forecast_period 
+        ORDER BY wf.forecast_date
+    ) AS accuracy_trend
+FROM scheduling.workforce_forecast wf
+LEFT JOIN operations.locations l ON wf.location_id = l.location_id
+LEFT JOIN hr.departments d ON wf.department_id = d.department_id
+LEFT JOIN hr.positions p ON wf.position_id = p.position_id
+WHERE wf.actual_demand IS NOT NULL
+AND wf.status IN ('PUBLISHED', 'ARCHIVED')
+ORDER BY wf.forecast_date DESC;
+
+COMMENT ON VIEW scheduling.v_forecast_accuracy_dashboard IS 
+'Dashboard view for monitoring forecast accuracy with trend analysis and categorization';
+
+
+-- -- Grant SELECT to reporting and management roles
+-- GRANT SELECT ON scheduling.workforce_forecast TO reporting_role, manager_role, admin_role, finance_role;
+
+-- -- Grant INSERT/UPDATE to planning and forecasting roles
+-- GRANT INSERT, UPDATE ON scheduling.workforce_forecast TO admin_role, planner_role, forecasting_role;
+
+-- -- Grant EXECUTE on any related functions
+-- -- GRANT EXECUTE ON FUNCTION scheduling.refresh_forecast_accuracy TO admin_role, scheduler_role;
+
+
+-- =============================================================================
+-- Serial No: 37 | TABLE: scheduling.schedule_comparison (ENHANCED)
+-- =============================================================================
+-- Description: Compares multiple schedule versions for analysis and decision making
+-- Business Case: Enables comparative analysis of different schedule versions to evaluate
+--                trade-offs, optimize outcomes, and make data-driven decisions.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.schedule_comparison (
+    -- Primary identifiers
+    comparison_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    comparison_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (comparison_code ~ '^CMP-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Comparison context
+    base_schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    comparison_schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    comparison_scenario VARCHAR(100),
+    comparison_type VARCHAR(50) NOT NULL DEFAULT 'VERSION'
+        CHECK (comparison_type IN ('VERSION', 'ALGORITHM', 'PARAMETER', 'CONSTRAINT', 'WHAT_IF')),
+    
+    -- Comparison metrics
+    coverage_difference NUMERIC(10,2),
+    cost_difference NUMERIC(15,2),
+    compliance_difference NUMERIC(10,2),
+    preference_satisfaction_difference NUMERIC(10,2),
+    employee_satisfaction_difference NUMERIC(10,2),
+    
+    -- Detailed comparisons
+    shift_count_difference INTEGER,
+    overtime_hours_difference NUMERIC(10,2),
+    understaffing_hours_difference NUMERIC(10,2),
+    overstaffing_hours_difference NUMERIC(10,2),
+    labor_cost_base NUMERIC(15,2),
+    labor_cost_comparison NUMERIC(15,2),
+    
+    -- Quality metrics
+    schedule_quality_score_base NUMERIC(10,2) CHECK (schedule_quality_score_base BETWEEN 0 AND 100),
+    schedule_quality_score_comparison NUMERIC(10,2) CHECK (schedule_quality_score_comparison BETWEEN 0 AND 100),
+    quality_improvement NUMERIC(10,2) GENERATED ALWAYS AS (
+        schedule_quality_score_comparison - schedule_quality_score_base
+    ) STORED,
+    quality_improvement_percentage NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE 
+            WHEN schedule_quality_score_base > 0 
+            THEN ((schedule_quality_score_comparison - schedule_quality_score_base) / schedule_quality_score_base * 100)
+            ELSE 0 
+        END
+    ) STORED,
+    
+    -- Employee impact
+    affected_employees_count INTEGER CHECK (affected_employees_count >= 0),
+    significant_changes_count INTEGER CHECK (significant_changes_count >= 0),
+    employee_impact_score NUMERIC(10,2) CHECK (employee_impact_score BETWEEN 0 AND 100),
+    shift_changes_count INTEGER DEFAULT 0,
+    assignment_changes_count INTEGER DEFAULT 0,
+    
+    -- Business impact
+    business_impact_assessment VARCHAR(20)
+        CHECK (business_impact_assessment IN ('POSITIVE', 'NEUTRAL', 'NEGATIVE', 'MIXED')),
+    operational_impact TEXT,
+    financial_impact NUMERIC(15,2),
+    roi_percentage NUMERIC(10,2),
+    
+    -- Comparison details
+    comparison_criteria JSONB NOT NULL DEFAULT '{}'::jsonb,
+    weight_factors JSONB NOT NULL DEFAULT '{}'::jsonb,
+    comparison_results JSONB NOT NULL DEFAULT '{}'::jsonb,
+    detailed_metrics JSONB DEFAULT '{}'::jsonb,
+    
+    -- Decision support
+    recommended_schedule_id UUID REFERENCES scheduling.schedules(schedule_id),
+    recommendation_confidence NUMERIC(5,2) CHECK (recommendation_confidence BETWEEN 0 AND 100),
+    recommendation_reasons TEXT[] DEFAULT '{}',
+    alternative_recommendations JSONB DEFAULT '[]'::jsonb,
+    
+    -- Status and usage
+    status VARCHAR(20) NOT NULL DEFAULT 'COMPLETED'
+        CHECK (status IN ('IN_PROGRESS', 'COMPLETED', 'ARCHIVED', 'SUPERSEDED', 'FAILED')),
+    used_in_decision BOOLEAN NOT NULL DEFAULT FALSE,
+    decision_outcome VARCHAR(100),
+    decision_date TIMESTAMP WITH TIME ZONE,
+    decision_by UUID REFERENCES hr.employees(employee_id),
+    
+    -- Performance tracking
+    comparison_duration_ms INTEGER CHECK (comparison_duration_ms >= 0),
+    comparison_started_at TIMESTAMP WITH TIME ZONE,
+    comparison_completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_schedule_comparison_different 
+        CHECK (base_schedule_id != comparison_schedule_id),
+    CONSTRAINT chk_quality_scores 
+        CHECK (
+            (schedule_quality_score_base IS NOT NULL AND schedule_quality_score_comparison IS NOT NULL) OR
+            (schedule_quality_score_base IS NULL AND schedule_quality_score_comparison IS NULL)
+        ),
+    CONSTRAINT chk_recommendation 
+        CHECK (
+            (recommended_schedule_id IS NULL AND recommendation_confidence IS NULL) OR
+            (recommended_schedule_id IS NOT NULL AND recommendation_confidence IS NOT NULL)
+        ),
+    CONSTRAINT chk_comparison_timing 
+        CHECK (
+            comparison_completed_at IS NULL OR 
+            comparison_completed_at >= comparison_started_at
+        )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_base
+    ON scheduling.schedule_comparison(base_schedule_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_comparison
+    ON scheduling.schedule_comparison(comparison_schedule_id, status);
+
+-- Quality and improvement indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_quality
+    ON scheduling.schedule_comparison(quality_improvement DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_quality_pct
+    ON scheduling.schedule_comparison(quality_improvement_percentage DESC NULLS LAST);
+
+-- Recommendation indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_recommended
+    ON scheduling.schedule_comparison(recommended_schedule_id) 
+    WHERE recommended_schedule_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_confidence
+    ON scheduling.schedule_comparison(recommendation_confidence DESC)
+    WHERE recommendation_confidence IS NOT NULL;
+
+-- Impact assessment indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_impact
+    ON scheduling.schedule_comparison(business_impact_assessment);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_financial
+    ON scheduling.schedule_comparison(financial_impact DESC);
+
+-- Status and usage indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_status
+    ON scheduling.schedule_comparison(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_used
+    ON scheduling.schedule_comparison(used_in_decision) 
+    WHERE used_in_decision = TRUE;
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_created
+    ON scheduling.schedule_comparison(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_duration
+    ON scheduling.schedule_comparison(comparison_duration_ms DESC)
+    WHERE comparison_duration_ms IS NOT NULL;
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_criteria
+    ON scheduling.schedule_comparison USING GIN(comparison_criteria);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_results
+    ON scheduling.schedule_comparison USING GIN(comparison_results);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_metadata
+    ON scheduling.schedule_comparison USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_tags
+    ON scheduling.schedule_comparison USING GIN(tags);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_type_status
+    ON scheduling.schedule_comparison(comparison_type, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_schedules
+    ON scheduling.schedule_comparison(base_schedule_id, comparison_schedule_id);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_comparison_decision
+    ON scheduling.schedule_comparison(used_in_decision, decision_date DESC)
+    WHERE used_in_decision = TRUE;
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_comparison_updated_at 
+    ON scheduling.schedule_comparison;
+
+CREATE TRIGGER trg_schedule_comparison_updated_at
+    BEFORE UPDATE ON scheduling.schedule_comparison
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate comparison code
+CREATE OR REPLACE FUNCTION scheduling.generate_comparison_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_sequence_number INTEGER;
+    v_base_schedule_code VARCHAR(50);
+BEGIN
+    IF NEW.comparison_code IS NULL THEN
+        -- Get base schedule code
+        SELECT schedule_code INTO v_base_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.base_schedule_id;
+        
+        -- Generate sequence number for this comparison type
+        SELECT COALESCE(MAX(CAST(SUBSTRING(comparison_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_comparison
+        WHERE comparison_code LIKE 'CMP-%';
+        
+        -- Format: CMP-SCHD-XXXXXX
+        NEW.comparison_code := 'CMP-' || COALESCE(SUBSTRING(v_base_schedule_code FROM 5), 'DEF') || '-' ||
+            LPAD(v_sequence_number::TEXT, 6, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_comparison_code 
+    ON scheduling.schedule_comparison;
+
+CREATE TRIGGER trg_schedule_comparison_code
+    BEFORE INSERT ON scheduling.schedule_comparison
+    FOR EACH ROW
+    EXECUTE FUNCTION scheduling.generate_comparison_code();
+
+-- =============================================================================
+-- COLUMN COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_comparison IS 
+'Compares multiple schedule versions for analysis, optimization, and data-driven decision making. 
+Supports scenario planning, what-if analysis, and schedule optimization evaluation.';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.comparison_id IS 
+'Unique identifier for the comparison record (UUID)';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.comparison_code IS 
+'Business-readable comparison code (format: CMP-SCHD-XXXXXX)';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.base_schedule_id IS 
+'Reference to the baseline schedule for comparison';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.comparison_schedule_id IS 
+'Reference to the alternative schedule being compared';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.comparison_type IS 
+'Type of comparison: VERSION, ALGORITHM, PARAMETER, CONSTRAINT, or WHAT_IF';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.quality_improvement IS 
+'Absolute improvement in quality score (calculated)';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.quality_improvement_percentage IS 
+'Percentage improvement in quality score (calculated)';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.affected_employees_count IS 
+'Number of employees impacted by schedule differences';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.business_impact_assessment IS 
+'Overall business impact: POSITIVE, NEUTRAL, NEGATIVE, or MIXED';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.recommended_schedule_id IS 
+'Schedule recommended based on comparison analysis';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.recommendation_confidence IS 
+'Confidence level in the recommendation (0-100)';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.used_in_decision IS 
+'Indicates if this comparison was used in final schedule selection';
+
+COMMENT ON COLUMN scheduling.schedule_comparison.comparison_duration_ms IS 
+'Time taken to perform the comparison in milliseconds';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+
+-- View for comparison summary
+CREATE OR REPLACE VIEW scheduling.vw_comparison_summary AS
+SELECT
+    sc.comparison_id,
+    sc.comparison_code,
+    sc.comparison_type,
+    bs.schedule_code AS base_schedule_code,
+    cs.schedule_code AS comparison_schedule_code,
+    sc.schedule_quality_score_base,
+    sc.schedule_quality_score_comparison,
+    sc.quality_improvement,
+    sc.quality_improvement_percentage,
+    sc.cost_difference,
+    sc.coverage_difference,
+    sc.business_impact_assessment,
+    sc.recommended_schedule_id,
+    sc.recommendation_confidence,
+    sc.status,
+    sc.used_in_decision,
+    sc.created_at,
+    e.first_name || ' ' || e.last_name AS created_by_name
+FROM scheduling.schedule_comparison sc
+JOIN scheduling.schedules bs ON sc.base_schedule_id = bs.schedule_id
+JOIN scheduling.schedules cs ON sc.comparison_schedule_id = cs.schedule_id
+LEFT JOIN hr.employees e ON sc.created_by = e.employee_id
+ORDER BY sc.created_at DESC;
+
+COMMENT ON VIEW scheduling.vw_comparison_summary IS 
+'Summary view of schedule comparisons with key metrics and recommendations';
+
+-- View for comparison effectiveness
+CREATE OR REPLACE VIEW scheduling.vw_comparison_effectiveness AS
+SELECT
+    comparison_type,
+    COUNT(*) AS total_comparisons,
+    COUNT(CASE WHEN used_in_decision = TRUE THEN 1 END) AS used_in_decisions,
+    ROUND(
+        COUNT(CASE WHEN used_in_decision = TRUE THEN 1 END)::NUMERIC / 
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS usage_rate,
+    AVG(quality_improvement) AS avg_quality_improvement,
+    AVG(recommendation_confidence) AS avg_confidence,
+    AVG(comparison_duration_ms) AS avg_duration_ms
+FROM scheduling.schedule_comparison
+WHERE status = 'COMPLETED'
+GROUP BY comparison_type
+ORDER BY usage_rate DESC;
+
+COMMENT ON VIEW scheduling.vw_comparison_effectiveness IS 
+'Effectiveness metrics for different comparison types';
+
+-- -- =============================================================================
+-- -- PERMISSION GRANTS
+-- -- =============================================================================
+
+-- GRANT SELECT ON scheduling.schedule_comparison TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_comparison TO manager_role, admin_role, scheduler_role;
+-- GRANT DELETE ON scheduling.schedule_comparison TO admin_role;
+-- GRANT SELECT ON scheduling.vw_comparison_summary TO reporting_role, manager_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_comparison_effectiveness TO admin_role, scheduler_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table structure
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_comparison'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_comparison'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_comparison';
+
+-- Test query
+SELECT
+    comparison_code,
+    comparison_type,
+    quality_improvement,
+    quality_improvement_percentage,
+    business_impact_assessment,
+    recommendation_confidence,
+    used_in_decision
+FROM scheduling.schedule_comparison
+WHERE status = 'COMPLETED'
+ORDER BY created_at DESC
+LIMIT 10;
+
+
+-- -- Serial No: 38 | TABLE: scheduling.labor_cost_tracking
+-- -- Description: Detailed tracking and analysis of labor costs by schedule
+-- -- Business Case: Provides granular visibility into labor costs associated with schedules,
+-- --                enabling cost optimization, budget adherence, and financial analysis.
+-- --                Supports cost forecasting, variance analysis, and profitability calculations.
+-- --                Integrates with payroll systems for accurate cost allocation.
+-- -- KPI: 1. Cost tracking accuracy (>99%), 2. Budget variance (<5%),
+-- --      3. Cost optimization savings (>15%), 4. Forecasting accuracy (>90%),
+-- --      5. Reporting timeliness (<24 hours), 6. Cost allocation accuracy (>98%),
+-- --      7. Manager cost awareness improvement (>40%)
+-- Drop existing table if it exists
+DROP TABLE IF EXISTS scheduling.labor_cost_tracking CASCADE;
+
+-- Recreate with ALL generated columns properly defined
+CREATE TABLE scheduling.labor_cost_tracking (
+    cost_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cost_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (cost_code ~ '^CST-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Multi-tenancy
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    
+    -- Cost context
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    location_id UUID NOT NULL REFERENCES operations.locations(location_id),
+    department_id UUID REFERENCES hr.departments(department_id),
+    cost_center_id UUID REFERENCES finance.cost_centers(cost_center_id),
+    position_id UUID REFERENCES hr.positions(position_id),
+    
+    -- Cost period
+    cost_date DATE NOT NULL,
+    cost_period VARCHAR(20) NOT NULL
+        CHECK (cost_period IN ('DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    fiscal_year INTEGER,
+    fiscal_period INTEGER,
+    
+    -- Cost breakdown (BASE COLUMNS - NOT GENERATED)
+    regular_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (regular_hours >= 0),
+    regular_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (regular_cost >= 0),
+    
+    overtime_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (overtime_hours >= 0),
+    overtime_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (overtime_cost >= 0),
+    
+    holiday_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (holiday_hours >= 0),
+    holiday_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (holiday_cost >= 0),
+    
+    premium_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (premium_hours >= 0),
+    premium_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (premium_cost >= 0),
+    
+    shift_differential_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (shift_differential_hours >= 0),
+    shift_differential_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (shift_differential_cost >= 0),
+    
+    -- GENERATED COLUMNS (ALL reference base columns directly, NOT other generated columns)
+    total_hours NUMERIC(10,2) GENERATED ALWAYS AS (
+        regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours
+    ) STORED CHECK (total_hours >= 0),
+    
+    total_cost NUMERIC(15,2) GENERATED ALWAYS AS (
+        regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost
+    ) STORED CHECK (total_cost >= 0),
+    
+    average_hourly_rate NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) > 0 
+            THEN (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) / 
+                 (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours)
+            ELSE 0
+        END
+    ) STORED,
+    
+    overtime_percentage NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) > 0 
+            THEN (overtime_hours / 
+                  (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    -- Comparison metrics
+    budgeted_hours NUMERIC(10,2) CHECK (budgeted_hours >= 0),
+    budgeted_cost NUMERIC(15,2) CHECK (budgeted_cost >= 0),
+    forecasted_hours NUMERIC(10,2) CHECK (forecasted_hours >= 0),
+    forecasted_cost NUMERIC(15,2) CHECK (forecasted_cost >= 0),
+    
+    -- VARIANCE COLUMNS (FIXED - reference base columns directly)
+    hours_variance NUMERIC(10,2) GENERATED ALWAYS AS (
+        (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) - 
+        COALESCE(budgeted_hours, 0)
+    ) STORED,
+    
+    cost_variance NUMERIC(15,2) GENERATED ALWAYS AS (
+        (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) - 
+        COALESCE(budgeted_cost, 0)
+    ) STORED,
+    
+    hours_variance_percentage NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN COALESCE(budgeted_hours, 0) > 0 
+            THEN (((regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) - 
+                   COALESCE(budgeted_hours, 0)) / budgeted_hours * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    cost_variance_percentage NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN COALESCE(budgeted_cost, 0) > 0 
+            THEN (((regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) - 
+                   COALESCE(budgeted_cost, 0)) / budgeted_cost * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    forecast_hours_variance NUMERIC(10,2) GENERATED ALWAYS AS (
+        (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) - 
+        COALESCE(forecasted_hours, 0)
+    ) STORED,
+    
+    forecast_cost_variance NUMERIC(15,2) GENERATED ALWAYS AS (
+        (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) - 
+        COALESCE(forecasted_cost, 0)
+    ) STORED,
+    
+    -- Employee metrics
+    employee_count INTEGER CHECK (employee_count >= 0),
+    unique_employees INTEGER CHECK (unique_employees >= 0),
+    
+    average_hours_per_employee NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN employee_count > 0 
+            THEN (regular_hours + overtime_hours + holiday_hours + premium_hours + shift_differential_hours) / employee_count
+            ELSE 0
+        END
+    ) STORED,
+    
+    cost_per_shift NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN employee_count > 0 
+            THEN (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) / employee_count
+            ELSE 0
+        END
+    ) STORED,
+    
+    labor_cost_percentage NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) > 0 
+            THEN (regular_cost / 
+                  (regular_cost + overtime_cost + holiday_cost + premium_cost + shift_differential_cost) * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    -- Cost drivers
+    cost_drivers JSONB DEFAULT '{}'::jsonb,
+    variance_explanations TEXT[] DEFAULT '{}',
+    adjustment_history JSONB DEFAULT '[]'::jsonb,
+    
+    -- Status and approval
+    status VARCHAR(20) NOT NULL DEFAULT 'CALCULATED'
+        CHECK (status IN ('CALCULATED', 'REVIEWED', 'APPROVED', 'ADJUSTED', 'FINALIZED', 'REJECTED')),
+    reviewed_by UUID REFERENCES hr.employees(employee_id),
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    adjustment_reason TEXT,
+    
+    -- Integration tracking
+    payroll_exported BOOLEAN NOT NULL DEFAULT FALSE,
+    payroll_export_date DATE,
+    payroll_batch_id VARCHAR(50),
+    accounting_exported BOOLEAN NOT NULL DEFAULT FALSE,
+    accounting_export_date DATE,
+    accounting_batch_id VARCHAR(50),
+    gl_posted BOOLEAN NOT NULL DEFAULT FALSE,
+    gl_posted_date DATE,
+    gl_batch_id VARCHAR(50),
+    
+    -- Version control
+    version_number INTEGER NOT NULL DEFAULT 1 CHECK (version_number >= 1),
+    previous_cost_id UUID REFERENCES scheduling.labor_cost_tracking(cost_id),
+    is_current_version BOOLEAN NOT NULL DEFAULT TRUE,
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_cost_consistency CHECK (
+        (regular_hours = 0 AND regular_cost = 0) OR
+        (regular_hours > 0 AND regular_cost > 0)
+    ),
+    CONSTRAINT chk_budget_comparison CHECK (
+        (budgeted_hours IS NULL AND budgeted_cost IS NULL) OR
+        (budgeted_hours IS NOT NULL AND budgeted_cost IS NOT NULL)
+    ),
+    CONSTRAINT chk_forecast_comparison CHECK (
+        (forecasted_hours IS NULL AND forecasted_cost IS NULL) OR
+        (forecasted_hours IS NOT NULL AND forecasted_cost IS NOT NULL)
+    ),
+    CONSTRAINT chk_review_status CHECK (
+        (status IN ('REVIEWED', 'APPROVED', 'ADJUSTED', 'FINALIZED') AND
+         reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL) OR
+        (status = 'CALCULATED' AND reviewed_by IS NULL AND reviewed_at IS NULL)
+    ),
+    CONSTRAINT chk_approval_status CHECK (
+        (status IN ('APPROVED', 'FINALIZED') AND
+         approved_by IS NOT NULL AND approved_at IS NOT NULL) OR
+        (status NOT IN ('APPROVED', 'FINALIZED'))
+    ),
+    CONSTRAINT chk_version_consistency CHECK (
+        (previous_cost_id IS NULL AND version_number = 1) OR
+        (previous_cost_id IS NOT NULL AND version_number > 1)
+    ),
+    CONSTRAINT chk_fiscal_period CHECK (
+        (fiscal_year IS NULL AND fiscal_period IS NULL) OR
+        (fiscal_year IS NOT NULL AND fiscal_period IS NOT NULL 
+         AND fiscal_period BETWEEN 1 AND 12)
+    )
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_schedule
+ON scheduling.labor_cost_tracking(schedule_id, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_tenant_date
+ON scheduling.labor_cost_tracking(tenant_id, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_location
+ON scheduling.labor_cost_tracking(location_id, cost_period, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_department
+ON scheduling.labor_cost_tracking(department_id, cost_date DESC) 
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_variance
+ON scheduling.labor_cost_tracking(cost_variance_percentage DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_status
+ON scheduling.labor_cost_tracking(status, cost_date DESC);
+
+-- Add table comment
+COMMENT ON TABLE scheduling.labor_cost_tracking IS 
+'Detailed tracking and analysis of labor costs by schedule with budget comparison, 
+forecast variance analysis, and financial system integration. Supports multi-version 
+tracking for adjustments and comprehensive audit trail.';
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Enhanced)
+-- =============================================================================
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_schedule
+ON scheduling.labor_cost_tracking(schedule_id, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_tenant_date
+ON scheduling.labor_cost_tracking(tenant_id, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_location
+ON scheduling.labor_cost_tracking(location_id, cost_period, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_department
+ON scheduling.labor_cost_tracking(department_id, cost_date DESC) 
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_cost_center
+ON scheduling.labor_cost_tracking(cost_center_id, cost_date DESC) 
+WHERE cost_center_id IS NOT NULL;
+
+
+-- Status and workflow indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_status
+ON scheduling.labor_cost_tracking(status, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_pending_review
+ON scheduling.labor_cost_tracking(status, reviewed_at) 
+WHERE status IN ('CALCULATED', 'REVIEWED');
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_pending_approval
+ON scheduling.labor_cost_tracking(status, approved_at) 
+WHERE status IN ('REVIEWED', 'ADJUSTED');
+
+-- Integration tracking indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_payroll_export
+ON scheduling.labor_cost_tracking(payroll_exported, payroll_export_date) 
+WHERE payroll_exported = FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_accounting_export
+ON scheduling.labor_cost_tracking(accounting_exported, accounting_export_date) 
+WHERE accounting_exported = FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_gl_posted
+ON scheduling.labor_cost_tracking(gl_posted, gl_posted_date) 
+WHERE gl_posted = FALSE;
+
+-- Version control indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_version
+ON scheduling.labor_cost_tracking(cost_id, version_number DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_current_version
+ON scheduling.labor_cost_tracking(is_current_version) 
+WHERE is_current_version = TRUE;
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_labor_cost_drivers
+ON scheduling.labor_cost_tracking USING GIN(cost_drivers);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_metadata
+ON scheduling.labor_cost_tracking USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_tags
+ON scheduling.labor_cost_tracking USING GIN(tags);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_labor_cost_dept_period
+ON scheduling.labor_cost_tracking(department_id, cost_period, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_center_period
+ON scheduling.labor_cost_tracking(cost_center_id, cost_period, cost_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_labor_cost_fiscal
+ON scheduling.labor_cost_tracking(fiscal_year, fiscal_period, cost_date DESC);
+
+-- BRIN index for time-series data (large tables)
+CREATE INDEX IF NOT EXISTS idx_labor_cost_date_brin
+ON scheduling.labor_cost_tracking USING BRIN(cost_date);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_labor_cost_tracking_updated_at 
+ON scheduling.labor_cost_tracking;
+
+CREATE TRIGGER trg_labor_cost_tracking_updated_at
+BEFORE UPDATE ON scheduling.labor_cost_tracking
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate cost code
+CREATE OR REPLACE FUNCTION scheduling.generate_labor_cost_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_schedule_code VARCHAR(50);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.cost_code IS NULL THEN
+        -- Get schedule code
+        SELECT schedule_code INTO v_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.schedule_id;
+        
+        -- Generate date suffix
+        v_date_suffix := TO_CHAR(NEW.cost_date, 'YYYYMMDD');
+        
+        -- Generate sequence number for this schedule/date
+        SELECT COALESCE(MAX(CAST(SUBSTRING(cost_code FROM 17) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.labor_cost_tracking
+        WHERE schedule_id = NEW.schedule_id
+        AND cost_date = NEW.cost_date;
+        
+        -- Format cost code: CST-SCHD-YYYYMMDD-###
+        NEW.cost_code := 'CST-' || SUBSTRING(v_schedule_code FROM 5) || '-' || 
+                         v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_labor_cost_tracking_code 
+ON scheduling.labor_cost_tracking;
+
+CREATE TRIGGER trg_labor_cost_tracking_code
+BEFORE INSERT ON scheduling.labor_cost_tracking
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_labor_cost_code();
+
+-- Trigger to manage version chain
+CREATE OR REPLACE FUNCTION scheduling.manage_cost_version_chain()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- If this is an adjustment, create version chain
+    IF NEW.status = 'ADJUSTED' AND OLD.status != 'ADJUSTED' THEN
+        -- Mark previous version as not current
+        UPDATE scheduling.labor_cost_tracking
+        SET is_current_version = FALSE
+        WHERE cost_id = OLD.cost_id;
+        
+        -- Set previous cost reference
+        NEW.previous_cost_id := OLD.cost_id;
+        NEW.version_number := OLD.version_number + 1;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_labor_cost_tracking_version 
+ON scheduling.labor_cost_tracking;
+
+CREATE TRIGGER trg_labor_cost_tracking_version
+BEFORE UPDATE OF status ON scheduling.labor_cost_tracking
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.manage_cost_version_chain();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+COMMENT ON TABLE scheduling.labor_cost_tracking IS 
+'Detailed tracking and analysis of labor costs by schedule with budget comparison, 
+forecast variance analysis, and financial system integration. Supports multi-version 
+tracking for adjustments and comprehensive audit trail.';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.tenant_id IS 
+'Multi-tenancy isolation identifier';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.cost_center_id IS 
+'Reference to finance.cost_centers for cost allocation';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.fiscal_year IS 
+'Fiscal year for financial reporting alignment';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.fiscal_period IS 
+'Fiscal period (1-12) for financial reporting alignment';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.shift_differential_hours IS 
+'Hours worked with shift differential pay (night, weekend, etc.)';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.shift_differential_cost IS 
+'Cost of shift differential pay';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.forecasted_hours IS 
+'Forecasted hours from demand forecasting for variance analysis';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.forecasted_cost IS 
+'Forecasted cost from labor cost forecasting for variance analysis';
+
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.cost_per_shift IS 
+'Average labor cost per employee/shift (calculated)';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.labor_cost_percentage IS 
+'Percentage of total cost that is regular pay (calculated)';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.adjustment_history IS 
+'JSONB array tracking all adjustments made to this cost record';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.approved_by IS 
+'Employee who approved the cost record (separate from reviewer)';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.approved_at IS 
+'Timestamp when cost record was approved';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.adjustment_reason IS 
+'Reason for cost adjustment';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.payroll_batch_id IS 
+'Batch ID from payroll system for reconciliation';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.accounting_batch_id IS 
+'Batch ID from accounting system for reconciliation';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.gl_posted IS 
+'Indicates if costs have been posted to General Ledger';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.gl_posted_date IS 
+'Date when costs were posted to General Ledger';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.gl_batch_id IS 
+'General Ledger batch ID for reconciliation';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.version_number IS 
+'Version number for tracking adjustments and revisions';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.previous_cost_id IS 
+'Reference to previous version in version chain';
+
+COMMENT ON COLUMN scheduling.labor_cost_tracking.is_current_version IS 
+'Indicates if this is the current active version';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+-- View for cost variance analysis
+CREATE OR REPLACE VIEW scheduling.vw_labor_cost_variance_analysis AS
+SELECT
+    lct.cost_id,
+    lct.cost_code,
+    lct.schedule_id,
+    s.schedule_code,
+    lct.cost_date,
+    lct.cost_period,
+    lct.department_id,
+    d.department_name,
+    lct.location_id,
+    l.location_name,
+    lct.cost_center_id,
+    cc.cost_center_name,
+    -- Hours analysis
+    lct.total_hours,
+    lct.budgeted_hours,
+    lct.forecasted_hours,
+    lct.hours_variance,
+    lct.hours_variance_percentage,
+    lct.forecast_hours_variance,
+    -- Cost analysis
+    lct.total_cost,
+    lct.budgeted_cost,
+    lct.forecasted_cost,
+    lct.cost_variance,
+    lct.cost_variance_percentage,
+    lct.forecast_cost_variance,
+    -- Cost breakdown
+    lct.regular_hours,
+    lct.regular_cost,
+    lct.overtime_hours,
+    lct.overtime_cost,
+    lct.overtime_percentage,
+    lct.holiday_hours,
+    lct.holiday_cost,
+    lct.premium_hours,
+    lct.premium_cost,
+    -- Efficiency metrics
+    lct.average_hourly_rate,
+    lct.employee_count,
+    lct.average_hours_per_employee,
+    lct.cost_per_shift,
+    -- Status
+    lct.status,
+    lct.payroll_exported,
+    lct.accounting_exported,
+    lct.gl_posted,
+    -- Risk indicators
+    CASE
+        WHEN ABS(lct.cost_variance_percentage) > 20 THEN 'HIGH_VARIANCE'
+        WHEN ABS(lct.cost_variance_percentage) > 10 THEN 'MEDIUM_VARIANCE'
+        WHEN ABS(lct.cost_variance_percentage) > 5 THEN 'LOW_VARIANCE'
+        ELSE 'ON_TARGET'
+    END AS variance_risk_level,
+    CASE
+        WHEN lct.overtime_percentage > 20 THEN 'HIGH_OVERTIME'
+        WHEN lct.overtime_percentage > 10 THEN 'MEDIUM_OVERTIME'
+        ELSE 'NORMAL_OVERTIME'
+    END AS overtime_risk_level,
+    -- Action required
+    CASE
+        WHEN ABS(lct.cost_variance_percentage) > 20 THEN 'INVESTIGATE_IMMEDIATELY'
+        WHEN lct.status = 'CALCULATED' THEN 'REVIEW_REQUIRED'
+        WHEN lct.payroll_exported = FALSE THEN 'EXPORT_TO_PAYROLL'
+        WHEN lct.gl_posted = FALSE THEN 'POST_TO_GL'
+        ELSE 'NO_ACTION'
+    END AS action_required,
+    lct.created_at,
+    lct.updated_at
+FROM scheduling.labor_cost_tracking lct
+LEFT JOIN scheduling.schedules s ON lct.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON lct.department_id = d.department_id
+LEFT JOIN operations.locations l ON lct.location_id = l.location_id
+LEFT JOIN finance.cost_centers cc ON lct.cost_center_id = cc.cost_center_id
+WHERE lct.is_current_version = TRUE
+ORDER BY lct.cost_date DESC, ABS(lct.cost_variance_percentage) DESC;
+
+COMMENT ON VIEW scheduling.vw_labor_cost_variance_analysis IS 
+'Comprehensive labor cost variance analysis with risk indicators and action recommendations';
+
+-- View for pending cost reviews
+CREATE OR REPLACE VIEW scheduling.vw_pending_cost_reviews AS
+SELECT
+    lct.cost_id,
+    lct.cost_code,
+    lct.schedule_id,
+    s.schedule_code,
+    lct.cost_date,
+    lct.department_id,
+    d.department_name,
+    lct.total_cost,
+    lct.cost_variance_percentage,
+    lct.status,
+    lct.created_at,
+    lct.created_by,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    EXTRACT(DAY FROM (CURRENT_TIMESTAMP - lct.created_at)) AS days_pending
+FROM scheduling.labor_cost_tracking lct
+LEFT JOIN scheduling.schedules s ON lct.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON lct.department_id = d.department_id
+LEFT JOIN hr.employees creator ON lct.created_by = creator.employee_id
+WHERE lct.status IN ('CALCULATED', 'REVIEWED')
+AND lct.is_current_version = TRUE
+ORDER BY lct.created_at ASC;
+
+COMMENT ON VIEW scheduling.vw_pending_cost_reviews IS 
+'Labor cost records pending review or approval with aging information';
+
+
+
+
+-- -- =============================================================================
+-- -- PERMISSION GRANTS
+-- -- =============================================================================
+-- GRANT SELECT ON scheduling.labor_cost_tracking TO reporting_role, manager_role, admin_role, finance_role, hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.labor_cost_tracking TO admin_role, finance_role, manager_role;
+-- GRANT DELETE ON scheduling.labor_cost_tracking TO admin_role;
+-- GRANT SELECT ON scheduling.vw_labor_cost_variance_analysis TO reporting_role, manager_role, admin_role, finance_role;
+-- GRANT SELECT ON scheduling.vw_pending_cost_reviews TO manager_role, admin_role, finance_role, hr_role;
+
+-- =============================================================================
+-- INTEGRATION WITH EXISTING TABLES
+-- =============================================================================
+-- Link to finance.labor_cost_forecast_history for forecast comparison
+-- Link to finance.labor_budget_allocations for budget comparison
+-- Link to finance.payroll_records for payroll reconciliation
+-- Link to scheduling.shifts for shift-level cost breakdown
+
+-- Example query to link with shifts
+SELECT 
+    lct.cost_id,
+    sh.shift_id,
+    sh.shift_date,
+    sh.estimated_labor_cost,
+    sh.actual_labor_cost,
+    lct.total_cost
+FROM scheduling.labor_cost_tracking lct
+JOIN scheduling.shifts sh ON lct.schedule_id = sh.schedule_id
+AND sh.start_time::DATE = lct.cost_date;
+
+-- Verify all generated columns exist
+SELECT column_name, data_type, is_generated
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'labor_cost_tracking'
+AND column_name IN (
+    'total_hours', 'total_cost', 'average_hourly_rate', 'overtime_percentage',
+    'hours_variance', 'cost_variance', 'hours_variance_percentage', 
+    'cost_variance_percentage', 'forecast_hours_variance', 'forecast_cost_variance',
+    'average_hours_per_employee', 'cost_per_shift', 'labor_cost_percentage'
+)
+ORDER BY column_name;
+
+-- =============================================================================
+-- Serial No: 39 | TABLE: scheduling.schedule_risk_assessment
+-- =============================================================================
+-- Description: Comprehensive risk assessment for schedules with mitigation planning
+-- Business Case: Proactively identifies and assesses scheduling risks to prevent 
+--                operational disruptions. Supports risk-based scheduling decisions 
+--                and contingency planning. Enables systematic risk management and 
+--                reduces schedule failure probability.
+-- KPI: Risk identification rate (>95%), Risk mitigation effectiveness (>85%),
+--      Schedule reliability improvement (>20%), Contingency planning coverage (>90%)
+-- Feature Reference: F-RSK-001, F-RSK-002, F-RSK-003, F-RSK-004, F-RSK-005
+-- Dependencies: scheduling.schedules, hr.employees, scheduling.schedule_compliance
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS scheduling.schedule_risk_assessment (
+    risk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    risk_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (risk_code ~ '^RSK-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Risk context
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    tenant_id UUID DEFAULT '00000000-0000-0000-0000-000000000000',
+    
+    -- Risk identification
+    risk_category VARCHAR(50) NOT NULL
+        CHECK (risk_category IN ('STAFFING', 'COMPLIANCE', 'OPERATIONAL', 'FINANCIAL',
+                                'TECHNICAL', 'ENVIRONMENTAL', 'SECURITY', 'SUPPLY_CHAIN')),
+    
+    risk_type VARCHAR(100) NOT NULL,
+    risk_description TEXT NOT NULL,
+    risk_title VARCHAR(200) NOT NULL,
+    
+    -- Risk quantification
+    likelihood VARCHAR(20) NOT NULL 
+        CHECK (likelihood IN ('RARE', 'UNLIKELY', 'POSSIBLE', 'LIKELY', 'CERTAIN')),
+    impact VARCHAR(20) NOT NULL 
+        CHECK (impact IN ('INSIGNIFICANT', 'MINOR', 'MODERATE', 'MAJOR', 'CATASTROPHIC')),
+    
+    likelihood_score INTEGER NOT NULL CHECK (likelihood_score BETWEEN 1 AND 5),
+    impact_score INTEGER NOT NULL CHECK (impact_score BETWEEN 1 AND 5),
+    
+    -- FIXED: risk_score references base columns (allowed)
+    risk_score INTEGER GENERATED ALWAYS AS (likelihood_score * impact_score) STORED 
+        CHECK (risk_score BETWEEN 1 AND 25),
+    
+    -- FIXED: risk_level now references base columns directly (NOT risk_score)
+    risk_level VARCHAR(20) GENERATED ALWAYS AS (
+        CASE
+            WHEN (likelihood_score * impact_score) <= 4 THEN 'LOW'
+            WHEN (likelihood_score * impact_score) <= 9 THEN 'MODERATE'
+            WHEN (likelihood_score * impact_score) <= 16 THEN 'HIGH'
+            ELSE 'EXTREME'
+        END
+    ) STORED,
+    
+    -- Risk details
+    risk_factors JSONB DEFAULT '{}'::jsonb,
+    risk_indicators TEXT[] DEFAULT '{}',
+    affected_areas TEXT[] DEFAULT '{}',
+    affected_employees UUID[] DEFAULT '{}',
+    affected_shifts UUID[] DEFAULT '{}',
+    
+    -- Mitigation planning
+    mitigation_strategy TEXT,
+    mitigation_actions TEXT[] DEFAULT '{}',
+    mitigation_owner UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    mitigation_due_date DATE,
+    mitigation_status VARCHAR(20) DEFAULT 'NOT_STARTED'
+        CHECK (mitigation_status IN ('NOT_STARTED', 'IN_PROGRESS', 'COMPLETED', 'DEFERRED')),
+    
+    -- Contingency planning
+    contingency_plan TEXT,
+    contingency_resources TEXT[] DEFAULT '{}',
+    contingency_owner UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    contingency_activated BOOLEAN NOT NULL DEFAULT FALSE,
+    contingency_activated_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Monitoring and control
+    monitoring_frequency VARCHAR(20) 
+        CHECK (monitoring_frequency IN ('DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY')),
+    control_measures TEXT[] DEFAULT '{}',
+    control_effectiveness VARCHAR(20) 
+        CHECK (control_effectiveness IN ('LOW', 'MODERATE', 'HIGH', 'VERY_HIGH')),
+    last_monitoring_date DATE,
+    next_monitoring_date DATE,
+    
+    -- Status tracking
+    status VARCHAR(20) NOT NULL DEFAULT 'IDENTIFIED'
+        CHECK (status IN ('IDENTIFIED', 'ASSESSED', 'MITIGATION_PLANNED', 'MITIGATION_IN_PROGRESS',
+                         'MITIGATED', 'MONITORING', 'CLOSED', 'ESCALATED')),
+    
+    -- Occurrence tracking
+    occurred BOOLEAN NOT NULL DEFAULT FALSE,
+    occurrence_date DATE,
+    actual_impact VARCHAR(20) 
+        CHECK (actual_impact IN ('INSIGNIFICANT', 'MINOR', 'MODERATE', 'MAJOR', 'CATASTROPHIC')),
+    impact_description TEXT,
+    actual_cost_impact NUMERIC(12,2) CHECK (actual_cost_impact >= 0),
+    actual_schedule_delay_days INTEGER CHECK (actual_schedule_delay_days >= 0),
+    
+    -- Review and approval
+    reviewed_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    approval_notes TEXT,
+    
+    -- Integration with compliance
+    related_compliance_id UUID REFERENCES scheduling.schedule_compliance(compliance_id) ON DELETE SET NULL,
+    compliance_violation_risk BOOLEAN NOT NULL DEFAULT FALSE,
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_risk_mitigation CHECK (
+        (mitigation_owner IS NULL AND mitigation_due_date IS NULL) OR
+        (mitigation_owner IS NOT NULL AND mitigation_due_date IS NOT NULL)
+    ),
+    CONSTRAINT chk_occurrence_tracking CHECK (
+        (occurred = TRUE AND occurrence_date IS NOT NULL AND actual_impact IS NOT NULL) OR
+        (occurred = FALSE AND occurrence_date IS NULL AND actual_impact IS NULL)
+    ),
+    CONSTRAINT chk_review_approval CHECK (
+        (status IN ('ASSESSED', 'MITIGATION_PLANNED', 'MITIGATION_IN_PROGRESS', 'MITIGATED', 'MONITORING', 'CLOSED') AND
+         reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL) OR
+        (status IN ('IDENTIFIED', 'ESCALATED') AND reviewed_by IS NULL AND reviewed_at IS NULL)
+    ),
+    CONSTRAINT chk_contingency_activation CHECK (
+        (contingency_activated = TRUE AND contingency_activated_at IS NOT NULL) OR
+        (contingency_activated = FALSE AND contingency_activated_at IS NULL)
+    ),
+    CONSTRAINT chk_monitoring_dates CHECK (
+        next_monitoring_date IS NULL OR last_monitoring_date IS NULL OR 
+        next_monitoring_date >= last_monitoring_date
+    )
+);
+
+
+-- =============================================================================
+-- ALTER TABLE: scheduling.schedule_risk_assessment
+-- Purpose: Add risk_level as a regular column (not generated) to allow trigger-based updates
+-- Business Case: PostgreSQL doesn't allow generated columns to reference other generated 
+--                columns. By making risk_level a regular column, we can use triggers to 
+--                calculate and maintain this value based on likelihood_score and impact_score.
+-- =============================================================================
+
+-- Step 1: Add the risk_level column as a regular VARCHAR column
+ALTER TABLE scheduling.schedule_risk_assessment
+ADD COLUMN IF NOT EXISTS risk_level VARCHAR(20)
+CHECK (risk_level IN ('LOW', 'MODERATE', 'HIGH', 'EXTREME'));
+
+-- Step 2: Add comment for documentation
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_level IS 
+'Risk level classification (LOW, MODERATE, HIGH, EXTREME) - calculated by trigger based on risk_score';
+
+-- Step 3: Create index for performance on risk_level queries
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_assessment_level
+ON scheduling.schedule_risk_assessment(risk_level)
+WHERE risk_level IS NOT NULL;
+
+-- =============================================================================
+-- TRIGGER FUNCTION: Calculate and update risk_level automatically
+-- =============================================================================
+CREATE OR REPLACE FUNCTION scheduling.calculate_risk_level()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Calculate risk_score first (if not already calculated)
+    NEW.risk_score := NEW.likelihood_score * NEW.impact_score;
+    
+    -- Calculate risk_level based on risk_score
+    CASE
+        WHEN NEW.risk_score <= 4 THEN NEW.risk_level := 'LOW';
+        WHEN NEW.risk_score <= 9 THEN NEW.risk_level := 'MODERATE';
+        WHEN NEW.risk_score <= 16 THEN NEW.risk_level := 'HIGH';
+        ELSE NEW.risk_level := 'EXTREME';
+    END CASE;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
+-- TRIGGER: Auto-calculate risk_level on INSERT or UPDATE
+-- =============================================================================
+DROP TRIGGER IF EXISTS trg_schedule_risk_assessment_calculate_level 
+ON scheduling.schedule_risk_assessment;
+
+CREATE TRIGGER trg_schedule_risk_assessment_calculate_level
+BEFORE INSERT OR UPDATE OF likelihood_score, impact_score 
+ON scheduling.schedule_risk_assessment
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.calculate_risk_level();
+
+-- -- =============================================================================
+-- -- BACKFILL: Update existing records with calculated risk_level
+-- -- =============================================================================
+-- UPDATE scheduling.schedule_risk_assessment
+-- SET risk_level = CASE
+--     WHEN (likelihood_score * impact_score) <= 4 THEN 'LOW'
+--     WHEN (likelihood_score * impact_score) <= 9 THEN 'MODERATE'
+--     WHEN (likelihood_score * impact_score) <= 16 THEN 'HIGH'
+--     ELSE 'EXTREME'
+-- END,
+-- risk_score = likelihood_score * impact_score
+-- WHERE risk_level IS NULL OR risk_score IS NULL;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+-- Verify column was added
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_risk_assessment'
+AND column_name = 'risk_level';
+
+-- Verify trigger exists
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_risk_assessment'
+AND trigger_name = 'trg_schedule_risk_assessment_calculate_level';
+
+
+-- Verify risk_level was calculated automatically
+SELECT risk_code, likelihood_score, impact_score, risk_score, risk_level
+FROM scheduling.schedule_risk_assessment
+WHERE risk_code = 'RSK-TEST-000001';
+
+-- -- Clean up test data
+-- DELETE FROM scheduling.schedule_risk_assessment
+-- WHERE risk_code = 'RSK-TEST-000001';
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_schedule
+ON scheduling.schedule_risk_assessment(schedule_id, risk_score DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_category
+ON scheduling.schedule_risk_assessment(risk_category, risk_level);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_level
+ON scheduling.schedule_risk_assessment(risk_level, status);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_status
+ON scheduling.schedule_risk_assessment(status, mitigation_due_date NULLS FIRST);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_occurrence
+ON scheduling.schedule_risk_assessment(occurred, occurrence_date DESC) 
+WHERE occurred = TRUE;
+
+-- Additional performance indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_mitigation_due
+ON scheduling.schedule_risk_assessment(mitigation_due_date) 
+WHERE mitigation_status IN ('NOT_STARTED', 'IN_PROGRESS');
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_monitoring
+ON scheduling.schedule_risk_assessment(next_monitoring_date) 
+WHERE status IN ('MONITORING', 'MITIGATION_IN_PROGRESS');
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_created
+ON scheduling.schedule_risk_assessment(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_tenant
+ON scheduling.schedule_risk_assessment(tenant_id, schedule_id);
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_factors
+ON scheduling.schedule_risk_assessment USING GIN(risk_factors);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_affected_employees
+ON scheduling.schedule_risk_assessment USING GIN(affected_employees);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_affected_shifts
+ON scheduling.schedule_risk_assessment USING GIN(affected_shifts);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_metadata
+ON scheduling.schedule_risk_assessment USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_tags
+ON scheduling.schedule_risk_assessment USING GIN(tags);
+
+-- Composite indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_high_priority
+ON scheduling.schedule_risk_assessment(risk_level, status, mitigation_due_date)
+WHERE risk_level IN ('HIGH', 'EXTREME') AND status NOT IN ('CLOSED', 'MITIGATED');
+
+CREATE INDEX IF NOT EXISTS idx_schedule_risk_compliance_link
+ON scheduling.schedule_risk_assessment(related_compliance_id) 
+WHERE related_compliance_id IS NOT NULL;
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_risk_assessment_updated_at 
+ON scheduling.schedule_risk_assessment;
+
+CREATE TRIGGER trg_schedule_risk_assessment_updated_at
+BEFORE UPDATE ON scheduling.schedule_risk_assessment
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate risk code
+CREATE OR REPLACE FUNCTION scheduling.generate_risk_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_schedule_code VARCHAR(50);
+    v_sequence_number INTEGER;
+BEGIN
+    IF NEW.risk_code IS NULL THEN
+        -- Get schedule code
+        SELECT schedule_code INTO v_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.schedule_id;
+        
+        -- Generate sequence number for this schedule
+        SELECT COALESCE(MAX(CAST(SUBSTRING(risk_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_risk_assessment
+        WHERE schedule_id = NEW.schedule_id
+        AND risk_code LIKE 'RSK-%-' || SUBSTRING(v_schedule_code FROM 5);
+        
+        -- Format risk code: RSK-SCHD-XXXXXX
+        NEW.risk_code := 'RSK-' || SUBSTRING(v_schedule_code FROM 5) || '-' ||
+                         LPAD(v_sequence_number::TEXT, 6, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_risk_assessment_code 
+ON scheduling.schedule_risk_assessment;
+
+CREATE TRIGGER trg_schedule_risk_assessment_code
+BEFORE INSERT ON scheduling.schedule_risk_assessment
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_risk_code();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_risk_assessment IS 
+'Comprehensive risk assessment for schedules with mitigation planning and contingency management. 
+Proactively identifies and assesses scheduling risks to prevent operational disruptions. 
+Supports risk-based scheduling decisions and contingency planning.';
+
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_id IS 'Unique identifier for the risk assessment (UUID)';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_code IS 'Business-readable risk code (format: RSK-SCHD-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.schedule_id IS 'Reference to the schedule being assessed';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_category IS 'Category of risk (STAFFING, COMPLIANCE, OPERATIONAL, etc.)';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_score IS 'Calculated risk score (likelihood × impact, 1-25)';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.risk_level IS 'Risk level (LOW, MODERATE, HIGH, EXTREME)';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.mitigation_owner IS 'Employee responsible for mitigation actions';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.contingency_owner IS 'Employee responsible for contingency plan';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.occurred IS 'Indicates if the risk has materialized';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.related_compliance_id IS 'Link to related compliance violation if applicable';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.actual_cost_impact IS 'Actual financial impact if risk occurred';
+COMMENT ON COLUMN scheduling.schedule_risk_assessment.actual_schedule_delay_days IS 'Actual schedule delay in days if risk occurred';
+
+-- =============================================================================
+-- HELPER VIEWS
+-- =============================================================================
+-- =============================================================================
+-- View for high-priority risks requiring immediate attention
+-- =============================================================================
+CREATE OR REPLACE VIEW scheduling.vw_high_priority_risks AS
+SELECT
+    sra.risk_id,
+    sra.risk_code,
+    sra.schedule_id,
+    s.schedule_code,
+    s.name AS schedule_name,
+    sra.risk_category,
+    sra.risk_type,
+    sra.risk_title,
+    sra.risk_level,
+    sra.risk_score,
+    sra.status,
+    sra.mitigation_due_date,
+    sra.mitigation_owner,
+    mo.first_name || ' ' || mo.last_name AS mitigation_owner_name,
+    sra.occurred,
+    sra.occurrence_date,
+    -- FIXED: Use AS for column alias, not :=
+    (sra.mitigation_due_date - CURRENT_DATE) AS days_until_due,
+    sra.created_at
+FROM scheduling.schedule_risk_assessment sra
+JOIN scheduling.schedules s ON sra.schedule_id = s.schedule_id
+LEFT JOIN hr.employees mo ON sra.mitigation_owner = mo.employee_id
+WHERE sra.risk_level IN ('HIGH', 'EXTREME')
+AND sra.status NOT IN ('CLOSED', 'MITIGATED')
+ORDER BY sra.risk_score DESC, sra.mitigation_due_date ASC NULLS FIRST;
+
+COMMENT ON VIEW scheduling.vw_high_priority_risks IS 
+'High-priority risks requiring immediate management attention';
+
+-- =============================================================================
+-- View for risks with overdue mitigation
+-- =============================================================================
+CREATE OR REPLACE VIEW scheduling.vw_overdue_risk_mitigations AS
+SELECT
+    sra.risk_id,
+    sra.risk_code,
+    sra.schedule_id,
+    sra.risk_category,
+    sra.risk_level,
+    sra.mitigation_due_date,
+    sra.mitigation_status,
+    sra.mitigation_owner,
+    -- FIXED: Use AS for column alias, not :=
+    (CURRENT_DATE - sra.mitigation_due_date) AS days_overdue,
+    sra.status
+FROM scheduling.schedule_risk_assessment sra
+WHERE sra.mitigation_due_date < CURRENT_DATE
+AND sra.mitigation_status NOT IN ('COMPLETED', 'DEFERRED')
+AND sra.status NOT IN ('CLOSED', 'MITIGATED')
+ORDER BY days_overdue DESC, sra.risk_score DESC;
+
+COMMENT ON VIEW scheduling.vw_overdue_risk_mitigations IS 
+'Risks with overdue mitigation actions requiring escalation';
+
+
+-- Test the views work correctly
+SELECT * FROM scheduling.vw_high_priority_risks LIMIT 5;
+SELECT * FROM scheduling.vw_overdue_risk_mitigations LIMIT 5;
+
+-- Verify view definitions
+SELECT 
+    schemaname,
+    viewname,
+    definition
+FROM pg_views
+WHERE schemaname = 'scheduling'
+AND viewname IN ('vw_high_priority_risks', 'vw_overdue_risk_mitigations');
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- GRANT SELECT ON scheduling.schedule_risk_assessment TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_risk_assessment TO manager_role, admin_role, hr_role;
+-- GRANT DELETE ON scheduling.schedule_risk_assessment TO admin_role;
+-- GRANT SELECT ON scheduling.vw_high_priority_risks TO reporting_role, manager_role, admin_role;
+-- GRANT SELECT ON scheduling.vw_overdue_risk_mitigations TO admin_role, hr_role;
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table structure
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_risk_assessment'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename = 'schedule_risk_assessment';
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_risk_assessment';
+
+-- Verify constraints
+SELECT conname, contype, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'scheduling.schedule_risk_assessment'::regclass;
+
+
+-- =============================================================================
+-- Serial No: 40 | TABLE: scheduling.schedule_performance_metrics
+-- =============================================================================
+-- Description: Comprehensive performance metrics collection for schedule analysis
+-- Business Case: Provides systematic collection and analysis of schedule performance metrics
+--                for continuous improvement. Supports benchmarking, trend analysis, and
+--                performance reporting. Enables data-driven decision making and identifies
+--                improvement opportunities. Integrates metrics from multiple sources including
+--                shifts, assignments, compliance violations, and employee feedback.
+-- KPI: 1. Metric collection completeness (>98%), 2. Data accuracy (>99%),
+--      3. Reporting timeliness (<24 hours), 4. Metric utilization rate (>80%),
+--      5. Performance improvement rate (>15%), 6. Benchmark comparison accuracy (>95%),
+--      7. Stakeholder satisfaction with metrics (>4/5)
+-- Feature Reference: F-ANA-001, F-ANA-002, F-REP-001, F-REP-002, F-OPT-001, F-OPT-002
+-- Dependencies: scheduling.schedules, scheduling.shifts, scheduling.shift_assignments,
+--               scheduling.schedule_compliance, hr.employees, hr.departments,
+--               operations.locations, analytics.performance_metrics
+-- =============================================================================
+
+-- Ensure enum type exists for metric periods
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'metric_period_enum') THEN
+CREATE TYPE scheduling.metric_period_enum AS ENUM (
+    'HOURLY',
+    'DAILY',
+    'WEEKLY',
+    'MONTHLY',
+    'QUARTERLY',
+    'ANNUAL',
+    'CUSTOM'
+);
+RAISE NOTICE 'Created enum type: scheduling.metric_period_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.metric_period_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.metric_period_enum IS
+'Defines the time period granularity for performance metric aggregation.
+HOURLY: Metrics aggregated by hour; DAILY: Metrics aggregated by day;
+WEEKLY: Metrics aggregated by week; MONTHLY: Metrics aggregated by month;
+QUARTERLY: Metrics aggregated by quarter; ANNUAL: Metrics aggregated by year;
+CUSTOM: Custom period definition.';
+
+-- Ensure enum type exists for metric status
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'metric_status_enum') THEN
+CREATE TYPE scheduling.metric_status_enum AS ENUM (
+    'CALCULATED',     -- Metric has been calculated
+    'VALIDATED',      -- Metric has been validated
+    'APPROVED',       -- Metric has been approved for reporting
+    'PUBLISHED',      -- Metric has been published to stakeholders
+    'ARCHIVED',       -- Metric has been archived
+    'RECALCULATED'    -- Metric has been recalculated
+);
+RAISE NOTICE 'Created enum type: scheduling.metric_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.metric_status_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.metric_status_enum IS
+'Defines the lifecycle status of performance metrics for workflow management.
+CALCULATED: Metric has been calculated; VALIDATED: Metric has been validated;
+APPROVED: Metric has been approved for reporting; PUBLISHED: Metric has been published;
+ARCHIVED: Metric has been archived; RECALCULATED: Metric has been recalculated.';
+
+-- Ensure enum type exists for performance trend
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'performance_trend_enum') THEN
+CREATE TYPE scheduling.performance_trend_enum AS ENUM (
+    'IMPROVING',
+    'STABLE',
+    'DECLINING',
+    'VOLATILE',
+    'INSUFFICIENT_DATA'
+);
+RAISE NOTICE 'Created enum type: scheduling.performance_trend_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.performance_trend_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.performance_trend_enum IS
+'Defines the trend direction of performance metrics over time.
+IMPROVING: Performance is getting better; STABLE: Performance is consistent;
+DECLINING: Performance is getting worse; VOLATILE: Performance fluctuates significantly;
+INSUFFICIENT_DATA: Not enough data to determine trend.';
+
+-- Create the enhanced table
+CREATE TABLE IF NOT EXISTS scheduling.schedule_performance_metrics (
+    -- Primary identifiers
+    metric_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    metric_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (metric_code ~ '^MET-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Metric context (aligned with existing schema)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    location_id UUID NOT NULL REFERENCES operations.locations(location_id) ON DELETE RESTRICT,
+    department_id UUID REFERENCES hr.departments(department_id) ON DELETE SET NULL,
+    position_id UUID REFERENCES hr.positions(position_id) ON DELETE SET NULL,
+    
+    -- Metric period (using enum type)
+    metric_date DATE NOT NULL,
+    metric_period scheduling.metric_period_enum NOT NULL DEFAULT 'DAILY',
+    period_start_date DATE NOT NULL,
+    period_end_date DATE NOT NULL
+        CHECK (period_end_date >= period_start_date),
+    
+    -- Coverage metrics (aligned with scheduling.shifts and scheduling.shift_assignments)
+    total_shifts_planned INTEGER NOT NULL DEFAULT 0 CHECK (total_shifts_planned >= 0),
+    total_shifts_filled INTEGER NOT NULL DEFAULT 0 CHECK (total_shifts_filled >= 0),
+    total_shifts_open INTEGER NOT NULL DEFAULT 0 CHECK (total_shifts_open >= 0),
+    scheduled_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (scheduled_hours >= 0),
+    worked_hours NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (worked_hours >= 0),
+    coverage_rate NUMERIC(5,2)
+        CHECK (coverage_rate IS NULL OR (coverage_rate >= 0 AND coverage_rate <= 100)),
+    
+    fill_rate NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN (total_shifts_filled + total_shifts_open) > 0
+            THEN (total_shifts_filled::NUMERIC / (total_shifts_filled + total_shifts_open) * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    -- Cost metrics (aligned with finance schema)
+    labor_cost NUMERIC(15,2) NOT NULL DEFAULT 0 CHECK (labor_cost >= 0),
+    budgeted_labor_cost NUMERIC(15,2) CHECK (budgeted_labor_cost >= 0),
+    cost_per_hour NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN worked_hours > 0 THEN labor_cost / worked_hours
+            ELSE 0
+        END
+    ) STORED,
+    cost_variance NUMERIC(15,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN budgeted_labor_cost IS NOT NULL THEN labor_cost - budgeted_labor_cost
+            ELSE NULL
+        END
+    ) STORED,
+    cost_variance_percentage NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN budgeted_labor_cost IS NOT NULL AND budgeted_labor_cost > 0
+            THEN ((labor_cost - budgeted_labor_cost) / budgeted_labor_cost * 100)
+            ELSE NULL
+        END
+    ) STORED,
+    
+    overtime_hours NUMERIC(10,2) DEFAULT 0 CHECK (overtime_hours >= 0),
+    overtime_percentage NUMERIC(5,2)
+        CHECK (overtime_percentage IS NULL OR (overtime_percentage >= 0 AND overtime_percentage <= 100)),
+    
+    -- Quality metrics (aligned with analytics.performance_metrics)
+    schedule_quality_score NUMERIC(5,2)
+        CHECK (schedule_quality_score IS NULL OR (schedule_quality_score BETWEEN 0 AND 100)),
+    employee_satisfaction_score NUMERIC(5,2)
+        CHECK (employee_satisfaction_score IS NULL OR (employee_satisfaction_score BETWEEN 0 AND 100)),
+    customer_satisfaction_score NUMERIC(5,2)
+        CHECK (customer_satisfaction_score IS NULL OR (customer_satisfaction_score BETWEEN 0 AND 100)),
+    service_level_agreement_rate NUMERIC(5,2)
+        CHECK (service_level_agreement_rate IS NULL OR (service_level_agreement_rate BETWEEN 0 AND 100)),
+    
+    -- Compliance metrics (aligned with scheduling.schedule_compliance)
+    compliance_rate NUMERIC(5,2)
+        CHECK (compliance_rate IS NULL OR (compliance_rate >= 0 AND compliance_rate <= 100)),
+    violations_count INTEGER NOT NULL DEFAULT 0 CHECK (violations_count >= 0),
+    critical_violations_count INTEGER NOT NULL DEFAULT 0 CHECK (critical_violations_count >= 0),
+    violations_per_hour NUMERIC(10,4) GENERATED ALWAYS AS (
+        CASE
+            WHEN worked_hours > 0 THEN violations_count::NUMERIC / worked_hours
+            ELSE 0
+        END
+    ) STORED,
+    compliance_violations JSONB DEFAULT '[]'::jsonb,
+    
+    -- Efficiency metrics
+    productivity_rate NUMERIC(10,2) CHECK (productivity_rate IS NULL OR productivity_rate >= 0),
+    utilization_rate NUMERIC(5,2)
+        CHECK (utilization_rate IS NULL OR (utilization_rate BETWEEN 0 AND 100)),
+    efficiency_score NUMERIC(5,2)
+        CHECK (efficiency_score IS NULL OR (efficiency_score BETWEEN 0 AND 100)),
+    
+    -- Attendance metrics (aligned with hr.attendance_records)
+    attendance_rate NUMERIC(5,2)
+        CHECK (attendance_rate IS NULL OR (attendance_rate BETWEEN 0 AND 100)),
+    late_arrivals_count INTEGER NOT NULL DEFAULT 0 CHECK (late_arrivals_count >= 0),
+    absences_count INTEGER NOT NULL DEFAULT 0 CHECK (absences_count >= 0),
+    no_show_count INTEGER NOT NULL DEFAULT 0 CHECK (no_show_count >= 0),
+    early_departures_count INTEGER NOT NULL DEFAULT 0 CHECK (early_departures_count >= 0),
+    
+    -- Employee metrics (aligned with hr.employees and scheduling.shift_assignments)
+    unique_employees_scheduled INTEGER NOT NULL DEFAULT 0 CHECK (unique_employees_scheduled >= 0),
+    unique_employees_worked INTEGER NOT NULL DEFAULT 0 CHECK (unique_employees_worked >= 0),
+    employee_turnover_rate NUMERIC(5,2)
+        CHECK (employee_turnover_rate IS NULL OR (employee_turnover_rate BETWEEN 0 AND 100)),
+    preference_fulfillment_rate NUMERIC(5,2)
+        CHECK (preference_fulfillment_rate IS NULL OR (preference_fulfillment_rate BETWEEN 0 AND 100)),
+    
+    -- Derived metrics
+    overall_performance_score NUMERIC(5,2)
+        CHECK (overall_performance_score IS NULL OR (overall_performance_score BETWEEN 0 AND 100)),
+    performance_trend scheduling.performance_trend_enum,
+    performance_trend_percentage NUMERIC(5,2)
+        CHECK (performance_trend_percentage IS NULL OR (performance_trend_percentage BETWEEN -100 AND 100)),
+    
+    -- Benchmark comparison (aligned with analytics.benchmark_data)
+    benchmark_id UUID REFERENCES analytics.benchmark_data(benchmark_id),
+    benchmark_target NUMERIC(10,2),
+    benchmark_type VARCHAR(50)
+        CHECK (benchmark_type IS NULL OR benchmark_type IN ('INDUSTRY_STANDARD', 'INTERNAL_HISTORICAL', 'TARGET', 'BEST_IN_CLASS')),
+    actual_vs_target NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN overall_performance_score IS NOT NULL AND benchmark_target IS NOT NULL
+            THEN overall_performance_score - benchmark_target
+            ELSE NULL
+        END
+    ) STORED,
+    performance_gap NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN overall_performance_score IS NOT NULL AND benchmark_target IS NOT NULL AND benchmark_target > 0
+            THEN ((overall_performance_score - benchmark_target) / benchmark_target * 100)
+            ELSE NULL
+        END
+    ) STORED,
+    benchmark_percentile NUMERIC(5,2)
+        CHECK (benchmark_percentile IS NULL OR (benchmark_percentile BETWEEN 0 AND 100)),
+    
+    -- Data sources and calculation
+    data_sources TEXT[] DEFAULT '{}',
+    calculation_method VARCHAR(100)
+        CHECK (calculation_method IS NULL OR calculation_method IN ('AUTOMATED', 'MANUAL', 'HYBRID', 'ML_BASED')),
+    calculation_formula TEXT,
+    data_quality_score NUMERIC(5,2)
+        CHECK (data_quality_score IS NULL OR (data_quality_score BETWEEN 0 AND 100)),
+    
+    -- Status and validation (using enum type)
+    status scheduling.metric_status_enum NOT NULL DEFAULT 'CALCULATED',
+    validated_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    validated_at TIMESTAMP WITH TIME ZONE,
+    approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    published_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Versioning and lineage
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    parent_metric_id UUID REFERENCES scheduling.schedule_performance_metrics(metric_id) ON DELETE SET NULL,
+    recalculated_from UUID REFERENCES scheduling.schedule_performance_metrics(metric_id) ON DELETE SET NULL,
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_metric_dates CHECK (
+        metric_date BETWEEN period_start_date AND period_end_date
+    ),
+    CONSTRAINT chk_metric_consistency CHECK (
+        (coverage_rate IS NULL OR (coverage_rate >= 0 AND coverage_rate <= 100)) AND
+        (fill_rate IS NULL OR (fill_rate >= 0 AND fill_rate <= 100)) AND
+        (cost_per_hour IS NULL OR cost_per_hour >= 0) AND
+        (violations_per_hour IS NULL OR violations_per_hour >= 0)
+    ),
+    CONSTRAINT chk_performance_scores CHECK (
+        (overall_performance_score IS NULL AND performance_trend IS NULL) OR
+        (overall_performance_score IS NOT NULL AND overall_performance_score BETWEEN 0 AND 100)
+    ),
+    CONSTRAINT chk_validation_status CHECK (
+        (status IN ('VALIDATED', 'APPROVED', 'PUBLISHED') AND validated_at IS NOT NULL) OR
+        (status IN ('CALCULATED', 'RECALCULATED', 'ARCHIVED') AND validated_at IS NULL)
+    ),
+    CONSTRAINT chk_shift_counts CHECK (
+        total_shifts_planned = total_shifts_filled + total_shifts_open
+    ),
+    CONSTRAINT chk_hours_consistency CHECK (
+        worked_hours <= scheduled_hours + overtime_hours
+    )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE OPTIMIZATION
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_schedule
+ON scheduling.schedule_performance_metrics(schedule_id, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_location
+ON scheduling.schedule_performance_metrics(location_id, metric_period, metric_date);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_department
+ON scheduling.schedule_performance_metrics(department_id, metric_date DESC)
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_position
+ON scheduling.schedule_performance_metrics(position_id, metric_date DESC)
+WHERE position_id IS NOT NULL;
+
+-- Score and performance indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_score
+ON scheduling.schedule_performance_metrics(overall_performance_score DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_trend
+ON scheduling.schedule_performance_metrics(performance_trend, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_quality
+ON scheduling.schedule_performance_metrics(schedule_quality_score DESC NULLS LAST);
+
+-- Period and time-based indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_period
+ON scheduling.schedule_performance_metrics(metric_period, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_date_range
+ON scheduling.schedule_performance_metrics(period_start_date, period_end_date);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_period_dates
+ON scheduling.schedule_performance_metrics(metric_period, period_start_date DESC);
+
+-- Benchmark and comparison indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_benchmark
+ON scheduling.schedule_performance_metrics(performance_gap) WHERE performance_gap IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_benchmark_target
+ON scheduling.schedule_performance_metrics(benchmark_id, actual_vs_target)
+WHERE benchmark_id IS NOT NULL;
+
+-- Status and workflow indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_status
+ON scheduling.schedule_performance_metrics(status, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_validated
+ON scheduling.schedule_performance_metrics(validated_at DESC)
+WHERE validated_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_approved
+ON scheduling.schedule_performance_metrics(approved_at DESC)
+WHERE approved_at IS NOT NULL;
+
+-- Compliance and violation indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_compliance
+ON scheduling.schedule_performance_metrics(compliance_rate ASC, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_violations
+ON scheduling.schedule_performance_metrics(violations_count DESC, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_critical_violations
+ON scheduling.schedule_performance_metrics(critical_violations_count DESC)
+WHERE critical_violations_count > 0;
+
+-- Cost and efficiency indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_cost
+ON scheduling.schedule_performance_metrics(labor_cost DESC, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_cost_variance
+ON scheduling.schedule_performance_metrics(cost_variance_percentage DESC NULLS LAST);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_efficiency
+ON scheduling.schedule_performance_metrics(efficiency_score DESC NULLS LAST);
+
+-- Employee metrics indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_employees
+ON scheduling.schedule_performance_metrics(unique_employees_scheduled, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_attendance
+ON scheduling.schedule_performance_metrics(attendance_rate ASC, metric_date DESC);
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_metadata
+ON scheduling.schedule_performance_metrics USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_tags
+ON scheduling.schedule_performance_metrics USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_compliance_violations
+ON scheduling.schedule_performance_metrics USING GIN(compliance_violations);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_data_sources
+ON scheduling.schedule_performance_metrics USING GIN(data_sources);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_schedule_period
+ON scheduling.schedule_performance_metrics(schedule_id, metric_period, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_location_period
+ON scheduling.schedule_performance_metrics(location_id, metric_period, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_dept_period
+ON scheduling.schedule_performance_metrics(department_id, metric_period, metric_date DESC)
+WHERE department_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_score_trend
+ON scheduling.schedule_performance_metrics(overall_performance_score DESC, performance_trend, metric_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_status_date
+ON scheduling.schedule_performance_metrics(status, metric_date DESC);
+
+-- BRIN index for time-series data (large historical tables)
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_time_brin
+ON scheduling.schedule_performance_metrics USING BRIN(metric_date);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_performance_metrics_updated_at
+ON scheduling.schedule_performance_metrics;
+
+CREATE TRIGGER trg_schedule_performance_metrics_updated_at
+BEFORE UPDATE ON scheduling.schedule_performance_metrics
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to validate metric data consistency
+CREATE OR REPLACE FUNCTION scheduling.validate_performance_metrics()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Validate shift counts
+    IF NEW.total_shifts_planned != (NEW.total_shifts_filled + NEW.total_shifts_open) THEN
+        RAISE EXCEPTION 'Shift counts must balance: planned (%) != filled (%) + open (%)',
+            NEW.total_shifts_planned, NEW.total_shifts_filled, NEW.total_shifts_open;
+    END IF;
+    
+    -- Validate hours consistency
+    IF NEW.worked_hours > (NEW.scheduled_hours + NEW.overtime_hours) THEN
+        RAISE EXCEPTION 'Worked hours (%) cannot exceed scheduled (%) + overtime (%) hours',
+            NEW.worked_hours, NEW.scheduled_hours, NEW.overtime_hours;
+    END IF;
+    
+    -- Auto-set status transitions
+    IF NEW.status = 'APPROVED' AND OLD.status != 'APPROVED' THEN
+        NEW.approved_at := CURRENT_TIMESTAMP;
+        NEW.approved_by := NEW.updated_by;
+    END IF;
+    
+    IF NEW.status = 'PUBLISHED' AND OLD.status != 'PUBLISHED' THEN
+        NEW.published_at := CURRENT_TIMESTAMP;
+    END IF;
+    
+    -- Auto-calculate data quality score if not provided
+    IF NEW.data_quality_score IS NULL THEN
+        NEW.data_quality_score := 100.00; -- Default to high quality
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_performance_metrics_validate
+ON scheduling.schedule_performance_metrics;
+
+CREATE TRIGGER trg_schedule_performance_metrics_validate
+BEFORE INSERT OR UPDATE ON scheduling.schedule_performance_metrics
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_performance_metrics();
+
+-- Trigger to auto-generate metric code
+CREATE OR REPLACE FUNCTION scheduling.generate_metric_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_schedule_code VARCHAR(50);
+    v_sequence_number INTEGER;
+    v_date_suffix VARCHAR(8);
+BEGIN
+    IF NEW.metric_code IS NULL THEN
+        -- Get schedule code
+        SELECT schedule_code INTO v_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.schedule_id;
+        
+        -- Generate date suffix
+        v_date_suffix := TO_CHAR(NEW.metric_date, 'YYYYMMDD');
+        
+        -- Generate sequence number for this schedule and date
+        SELECT COALESCE(MAX(CAST(SUBSTRING(metric_code FROM 17) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_performance_metrics
+        WHERE schedule_id = NEW.schedule_id
+        AND metric_date = NEW.metric_date;
+        
+        -- Format metric code: MET-SCHD-YYYYMMDD-###
+        NEW.metric_code := 'MET-' || SUBSTRING(v_schedule_code FROM 5) || '-' ||
+                           v_date_suffix || '-' || LPAD(v_sequence_number::TEXT, 3, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_performance_metrics_code
+ON scheduling.schedule_performance_metrics;
+
+CREATE TRIGGER trg_schedule_performance_metrics_code
+BEFORE INSERT ON scheduling.schedule_performance_metrics
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_metric_code();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_performance_metrics IS
+'Comprehensive collection and analysis of schedule performance metrics for continuous improvement and benchmarking.
+Provides systematic tracking of coverage, cost, quality, compliance, efficiency, and attendance metrics.
+Supports data-driven decision making, trend analysis, and performance reporting. Integrates with existing
+scheduling, HR, finance, and analytics tables for holistic workforce performance management.
+KEY FEATURES:
+- Multi-dimensional metrics (coverage, cost, quality, compliance, efficiency, attendance)
+- Benchmark comparison and gap analysis
+- Automated validation and consistency checks
+- Versioning and lineage tracking
+- Comprehensive audit trail
+- Flexible metadata and tagging
+KPI TARGETS:
+- Metric collection completeness: >98%
+- Data accuracy: >99%
+- Reporting timeliness: <24 hours
+- Metric utilization rate: >80%
+- Performance improvement rate: >15%';
+
+-- Column comments for key fields
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.metric_id IS 'Unique identifier for the performance metric record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.metric_code IS 'Business-readable metric code (format: MET-SCHD-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.schedule_id IS 'Reference to the schedule being measured';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.location_id IS 'Reference to the location for geographic analysis';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.department_id IS 'Reference to the department for organizational analysis';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.position_id IS 'Reference to the position for role-based analysis';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.metric_date IS 'Date the metric represents';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.metric_period IS 'Granularity of metric aggregation (HOURLY, DAILY, WEEKLY, etc.)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.period_start_date IS 'Start date of the measurement period';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.period_end_date IS 'End date of the measurement period';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.total_shifts_planned IS 'Total number of shifts planned for the period';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.total_shifts_filled IS 'Number of shifts successfully filled';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.total_shifts_open IS 'Number of shifts still open/unfilled';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.coverage_rate IS 'Percentage of required coverage achieved (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.fill_rate IS 'Percentage of shifts filled vs total (calculated)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.labor_cost IS 'Total labor cost for the period';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.budgeted_labor_cost IS 'Budgeted labor cost for comparison';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.cost_variance IS 'Difference between actual and budgeted cost (calculated)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.cost_variance_percentage IS 'Percentage variance from budget (calculated)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.schedule_quality_score IS 'Overall schedule quality score (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.employee_satisfaction_score IS 'Employee satisfaction with schedule (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.compliance_rate IS 'Percentage of compliance requirements met (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.violations_count IS 'Total number of compliance violations';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.critical_violations_count IS 'Number of critical severity violations';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.productivity_rate IS 'Productivity measurement (units per hour or similar)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.utilization_rate IS 'Percentage of available time utilized (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.attendance_rate IS 'Percentage of scheduled employees who attended (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.overall_performance_score IS 'Composite performance score (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.performance_trend IS 'Direction of performance trend (IMPROVING, STABLE, DECLINING)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.benchmark_id IS 'Reference to benchmark for comparison';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.benchmark_target IS 'Target value for benchmark comparison';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.actual_vs_target IS 'Difference between actual and target (calculated)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.performance_gap IS 'Percentage gap from target (calculated)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.status IS 'Current status in metric lifecycle (CALCULATED, VALIDATED, APPROVED, etc.)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.validated_by IS 'Employee who validated the metric';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.approved_by IS 'Employee who approved the metric for reporting';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.version IS 'Version number for metric revisions';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.parent_metric_id IS 'Reference to parent metric for hierarchical relationships';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.recalculated_from IS 'Reference to previous version if recalculated';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.data_quality_score IS 'Quality score for the metric data (0-100)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.calculation_method IS 'Method used to calculate metric (AUTOMATED, MANUAL, HYBRID, ML_BASED)';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.metadata IS 'Flexible JSONB metadata for extensibility';
+COMMENT ON COLUMN scheduling.schedule_performance_metrics.tags IS 'Array of tags for categorization and filtering';
+
+-- =============================================================================
+-- HELPER VIEWS FOR COMMON QUERIES
+-- =============================================================================
+
+-- View for schedule performance dashboard
+CREATE OR REPLACE VIEW scheduling.vw_schedule_performance_dashboard AS
+SELECT
+    spm.metric_id,
+    spm.metric_code,
+    spm.schedule_id,
+    s.schedule_code,
+    s.name AS schedule_name,
+    spm.location_id,
+    l.location_name,
+    spm.department_id,
+    d.department_name,
+    spm.metric_date,
+    spm.metric_period,
+    spm.overall_performance_score,
+    spm.performance_trend,
+    spm.coverage_rate,
+    spm.fill_rate,
+    spm.compliance_rate,
+    spm.attendance_rate,
+    spm.efficiency_score,
+    spm.labor_cost,
+    spm.cost_variance_percentage,
+    spm.violations_count,
+    spm.critical_violations_count,
+    spm.status,
+    spm.validated_at,
+    spm.approved_at,
+    spm.benchmark_target,
+    spm.performance_gap,
+    spm.data_quality_score,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    validator.first_name || ' ' || validator.last_name AS validated_by_name,
+    approver.first_name || ' ' || approver.last_name AS approved_by_name,
+    spm.created_at,
+    spm.updated_at,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_performance_metrics spm
+LEFT JOIN scheduling.schedules s ON spm.schedule_id = s.schedule_id
+LEFT JOIN operations.locations l ON spm.location_id = l.location_id
+LEFT JOIN hr.departments d ON spm.department_id = d.department_id
+LEFT JOIN hr.employees creator ON spm.created_by = creator.employee_id
+LEFT JOIN hr.employees validator ON spm.validated_by = validator.employee_id
+LEFT JOIN hr.employees approver ON spm.approved_by = approver.employee_id
+WHERE spm.status IN ('VALIDATED', 'APPROVED', 'PUBLISHED')
+ORDER BY spm.metric_date DESC, spm.overall_performance_score DESC;
+
+COMMENT ON VIEW scheduling.vw_schedule_performance_dashboard IS
+'Dashboard view for schedule performance metrics with employee names and context';
+
+-- View for performance trends over time
+CREATE OR REPLACE VIEW scheduling.vw_schedule_performance_trends AS
+SELECT
+    spm.schedule_id,
+    s.schedule_code,
+    spm.metric_period,
+    DATE_TRUNC(spm.metric_period::TEXT, spm.metric_date) AS period_start,
+    AVG(spm.overall_performance_score) AS avg_performance_score,
+    AVG(spm.coverage_rate) AS avg_coverage_rate,
+    AVG(spm.compliance_rate) AS avg_compliance_rate,
+    AVG(spm.attendance_rate) AS avg_attendance_rate,
+    AVG(spm.efficiency_score) AS avg_efficiency_score,
+    SUM(spm.labor_cost) AS total_labor_cost,
+    SUM(spm.violations_count) AS total_violations,
+    COUNT(*) AS metric_count,
+    MIN(spm.metric_date) AS period_first_date,
+    MAX(spm.metric_date) AS period_last_date,
+    -- Trend calculation
+    LAG(AVG(spm.overall_performance_score)) OVER (
+        PARTITION BY spm.schedule_id, spm.metric_period
+        ORDER BY DATE_TRUNC(spm.metric_period::TEXT, spm.metric_date)
+    ) AS previous_period_score,
+    AVG(spm.overall_performance_score) - LAG(AVG(spm.overall_performance_score)) OVER (
+        PARTITION BY spm.schedule_id, spm.metric_period
+        ORDER BY DATE_TRUNC(spm.metric_period::TEXT, spm.metric_date)
+    ) AS score_change,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_performance_metrics spm
+LEFT JOIN scheduling.schedules s ON spm.schedule_id = s.schedule_id
+WHERE spm.status IN ('VALIDATED', 'APPROVED', 'PUBLISHED')
+GROUP BY spm.schedule_id, s.schedule_code, spm.metric_period,
+         DATE_TRUNC(spm.metric_period::TEXT, spm.metric_date)
+ORDER BY period_start DESC;
+
+COMMENT ON VIEW scheduling.vw_schedule_performance_trends IS
+'Performance trends over time with period-over-period comparisons';
+
+-- View for benchmark comparison
+CREATE OR REPLACE VIEW scheduling.vw_schedule_benchmark_comparison AS
+SELECT
+    spm.metric_id,
+    spm.metric_code,
+    spm.schedule_id,
+    s.schedule_code,
+    spm.location_id,
+    l.location_name,
+    spm.department_id,
+    d.department_name,
+    spm.metric_date,
+    spm.metric_period,
+    spm.overall_performance_score AS actual_score,
+    spm.benchmark_target AS target_score,
+    spm.actual_vs_target AS variance,
+    spm.performance_gap AS gap_percentage,
+    spm.benchmark_type,
+    bd.benchmark_name,
+    bd.industry,
+    bd.region,
+    CASE
+        WHEN spm.performance_gap > 10 THEN 'SIGNIFICANTLY_ABOVE'
+        WHEN spm.performance_gap > 0 THEN 'ABOVE'
+        WHEN spm.performance_gap = 0 THEN 'AT_TARGET'
+        WHEN spm.performance_gap > -10 THEN 'BELOW'
+        ELSE 'SIGNIFICANTLY_BELOW'
+    END AS performance_category,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_performance_metrics spm
+LEFT JOIN scheduling.schedules s ON spm.schedule_id = s.schedule_id
+LEFT JOIN operations.locations l ON spm.location_id = l.location_id
+LEFT JOIN hr.departments d ON spm.department_id = d.department_id
+LEFT JOIN analytics.benchmark_data bd ON spm.benchmark_id = bd.benchmark_id
+WHERE spm.benchmark_id IS NOT NULL
+AND spm.status IN ('VALIDATED', 'APPROVED', 'PUBLISHED')
+ORDER BY spm.performance_gap DESC, spm.metric_date DESC;
+
+COMMENT ON VIEW scheduling.vw_schedule_benchmark_comparison IS
+'Benchmark comparison view showing actual vs target performance';
+
+-- =============================================================================
+-- PERMISSION GRANTS
+-- =============================================================================
+
+-- -- Grant SELECT to appropriate roles based on schema security model
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO manager_role;
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO admin_role;
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO hr_role;
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO finance_role;
+-- GRANT SELECT ON scheduling.schedule_performance_metrics TO compliance_role;
+
+-- -- Grant INSERT, UPDATE to roles that need to calculate/update metrics
+-- GRANT INSERT, UPDATE ON scheduling.schedule_performance_metrics TO admin_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_performance_metrics TO scheduler_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_performance_metrics TO analytics_role;
+
+-- -- Grant DELETE to admin only
+-- GRANT DELETE ON scheduling.schedule_performance_metrics TO admin_role;
+
+-- -- Grant SELECT on views
+-- GRANT SELECT ON scheduling.vw_schedule_performance_dashboard TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT SELECT ON scheduling.vw_schedule_performance_trends TO reporting_role, manager_role, admin_role, analytics_role;
+-- GRANT SELECT ON scheduling.vw_schedule_benchmark_comparison TO reporting_role, manager_role, admin_role, finance_role;
+
+-- =============================================================================
+-- MAINTENANCE PROCEDURES
+-- =============================================================================
+
+-- Procedure to archive old metrics
+CREATE OR REPLACE PROCEDURE scheduling.archive_old_performance_metrics(
+    p_days_old INTEGER DEFAULT 730,
+    p_batch_size INTEGER DEFAULT 5000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_archived_count INTEGER;
+BEGIN
+    -- Archive metrics older than specified days
+    WITH archived AS (
+        DELETE FROM scheduling.schedule_performance_metrics
+        WHERE metric_id IN (
+            SELECT metric_id
+            FROM scheduling.schedule_performance_metrics
+            WHERE metric_date < CURRENT_DATE - (p_days_old || ' days')::INTERVAL
+            AND status IN ('PUBLISHED', 'ARCHIVED')
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    INSERT INTO scheduling.schedule_performance_metrics_archive
+    SELECT * FROM archived;
+    
+    GET DIAGNOSTICS v_archived_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Archived % old performance metric records', v_archived_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_ARCHIVE',
+        'scheduling.archive_old_performance_metrics',
+        format('Archived %s performance metrics older than %s days', v_archived_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('archived_count', v_archived_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.archive_old_performance_metrics IS
+'Archives old performance metric records to maintain table performance';
+
+-- Procedure to recalculate metrics
+CREATE OR REPLACE PROCEDURE scheduling.recalculate_performance_metrics(
+    p_schedule_id UUID DEFAULT NULL,
+    p_start_date DATE DEFAULT NULL,
+    p_end_date DATE DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_recalculated_count INTEGER;
+BEGIN
+    -- Recalculate metrics for specified schedule and date range
+    UPDATE scheduling.schedule_performance_metrics
+    SET
+        status = 'RECALCULATED',
+        recalculated_from = metric_id,
+        updated_at = CURRENT_TIMESTAMP,
+        updated_by = '00000000-0000-0000-0000-000000000000'::UUID
+    WHERE (p_schedule_id IS NULL OR schedule_id = p_schedule_id)
+    AND (p_start_date IS NULL OR metric_date >= p_start_date)
+    AND (p_end_date IS NULL OR metric_date <= p_end_date)
+    AND status IN ('CALCULATED', 'VALIDATED');
+    
+    GET DIAGNOSTICS v_recalculated_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Recalculated % performance metric records', v_recalculated_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_RECALCULATION',
+        'scheduling.recalculate_performance_metrics',
+        format('Recalculated %s performance metrics', v_recalculated_count),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('recalculated_count', v_recalculated_count, 'schedule_id', p_schedule_id)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.recalculate_performance_metrics IS
+'Recalculates performance metrics for specified schedule and date range';
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify table exists
+SELECT table_name, table_schema
+FROM information_schema.tables
+WHERE table_name = 'schedule_performance_metrics'
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_name = 'schedule_performance_metrics'
+AND table_schema = 'scheduling'
+ORDER BY ordinal_position;
+
+-- Verify indexes
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'schedule_performance_metrics'
+AND schemaname = 'scheduling'
+ORDER BY indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE event_object_table = 'schedule_performance_metrics'
+AND event_object_schema = 'scheduling';
+
+-- Verify constraints
+SELECT conname, contype, condeferrable
+FROM pg_constraint
+WHERE conrelid = 'scheduling.schedule_performance_metrics'::regclass;
+
+-- Verify enum types
+SELECT
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+WHERE typname IN ('metric_period_enum', 'metric_status_enum', 'performance_trend_enum')
+GROUP BY typname;
+
+-- Test query
+SELECT
+    metric_code,
+    schedule_id,
+    metric_date,
+    metric_period,
+    overall_performance_score,
+    coverage_rate,
+    compliance_rate,
+    status,
+    created_at
+FROM scheduling.schedule_performance_metrics
+WHERE metric_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY metric_date DESC, overall_performance_score DESC
+LIMIT 10;
+
+-- =============================================================================
+-- Serial No: 41 | TABLE: scheduling.schedule_version_control
+-- =============================================================================
+-- Description: Manages version history and branching of schedules for change management
+-- Business Case: Enables version control for schedules similar to software versioning systems,
+--                allowing rollback, branching, merging, and audit trails of schedule changes.
+--                Supports complex schedule evolution, collaborative editing, and change approval
+--                workflows. Prevents data loss and enables historical schedule reconstruction.
+--                Complements scheduling.schedule_history by providing structured version management
+--                with branching capabilities for parallel schedule development.
+-- KPI: 1. Version control accuracy (>99.9%), 2. Rollback success rate (>95%),
+--      3. Change conflict resolution rate (>90%), 4. Version comparison speed (<5 seconds),
+--      5. Branch merging success rate (>85%), 6. Historical data reconstruction accuracy (>99%),
+--      7. Team collaboration efficiency improvement (>40%)
+-- Feature Reference: F-SCH-041, F-SCH-042, F-SCH-043, F-AUD-013, F-COL-001
+-- Dependencies: scheduling.schedules, scheduling.schedule_history, scheduling.schedule_approvals,
+--               hr.employees, scheduling.shifts, scheduling.shift_assignments
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.schedule_version_control (
+    -- Primary identifiers
+    version_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    version_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (version_code ~ '^VER-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Version context (aligned with existing schedule tables)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    parent_version_id UUID REFERENCES scheduling.schedule_version_control(version_id),
+    root_version_id UUID REFERENCES scheduling.schedule_version_control(version_id),
+    schedule_history_id UUID REFERENCES scheduling.schedule_history(history_id),
+    
+    -- Version information (semantic versioning pattern)
+    version_number VARCHAR(50) NOT NULL
+        CHECK (version_number ~ '^\d+\.\d+\.\d+$'),
+    version_type VARCHAR(20) NOT NULL
+        CHECK (version_type IN ('MAJOR', 'MINOR', 'PATCH', 'BRANCH', 'MERGE', 'HOTFIX')),
+    branch_name VARCHAR(100),
+    branch_type VARCHAR(20)
+        CHECK (branch_type IN ('FEATURE', 'BUGFIX', 'RELEASE', 'EXPERIMENTAL', 'EMERGENCY')),
+    
+    -- Version metadata
+    commit_message TEXT NOT NULL,
+    commit_hash VARCHAR(64),
+    tags TEXT[] DEFAULT '{}',
+    is_stable BOOLEAN NOT NULL DEFAULT FALSE,
+    is_released BOOLEAN NOT NULL DEFAULT FALSE,
+    is_current BOOLEAN NOT NULL DEFAULT FALSE,
+    
+    -- Change tracking (aligned with schedule_history)
+    changed_shifts UUID[] DEFAULT '{}',
+    changed_assignments UUID[] DEFAULT '{}',
+    added_shifts UUID[] DEFAULT '{}',
+    removed_shifts UUID[] DEFAULT '{}',
+    modified_assignments UUID[] DEFAULT '{}',
+    
+    -- Diff information (JSONB for flexibility)
+    diff_summary JSONB DEFAULT '{}'::jsonb,
+    full_snapshot JSONB NOT NULL,
+    change_set JSONB DEFAULT '{}'::jsonb,
+    rollback_snapshot JSONB,
+    
+    -- Status and lifecycle (aligned with schedule_status_enum)
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'ARCHIVED', 'MERGED', 'REVERTED', 'CONFLICT', 'LOCKED', 'DRAFT')),
+    lifecycle_stage VARCHAR(20)
+        CHECK (lifecycle_stage IN ('DEVELOPMENT', 'TESTING', 'STAGING', 'PRODUCTION', 'ARCHIVED')),
+    
+    -- Merge and conflict information
+    merge_source_version_id UUID REFERENCES scheduling.schedule_version_control(version_id),
+    merge_target_version_id UUID REFERENCES scheduling.schedule_version_control(version_id),
+    merge_conflicts JSONB DEFAULT '{}'::jsonb,
+    merge_resolution JSONB DEFAULT '{}'::jsonb,
+    merge_completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Rollback information
+    rollback_from_version_id UUID REFERENCES scheduling.schedule_version_control(version_id),
+    rollback_reason TEXT,
+    rollback_completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Approval workflow (aligned with schedule_approvals)
+    requires_approval BOOLEAN NOT NULL DEFAULT TRUE,
+    approval_status VARCHAR(20) DEFAULT 'PENDING'
+        CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Validation and compliance
+    validation_status VARCHAR(20) DEFAULT 'PENDING'
+        CHECK (validation_status IN ('PENDING', 'VALID', 'INVALID', 'NEEDS_REVIEW')),
+    validation_errors JSONB DEFAULT '[]'::jsonb,
+    compliance_check_performed BOOLEAN NOT NULL DEFAULT FALSE,
+    compliance_violations JSONB DEFAULT '[]'::jsonb,
+    
+    -- Performance metrics
+    version_size_bytes BIGINT CHECK (version_size_bytes >= 0),
+    comparison_time_ms INTEGER CHECK (comparison_time_ms >= 0),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    committed_by UUID REFERENCES hr.employees(employee_id),
+    committed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    -- Constraints
+    CONSTRAINT chk_version_hierarchy CHECK (
+        (parent_version_id IS NULL AND root_version_id IS NULL) OR
+        (parent_version_id IS NOT NULL)
+    ),
+    CONSTRAINT chk_merge_info CHECK (
+        (merge_source_version_id IS NULL AND merge_target_version_id IS NULL) OR
+        (merge_source_version_id IS NOT NULL AND merge_target_version_id IS NOT NULL)
+    ),
+    CONSTRAINT chk_commit_info CHECK (
+        (committed_by IS NOT NULL AND committed_at IS NOT NULL) OR
+        (committed_by IS NULL AND committed_at IS NULL)
+    ),
+    CONSTRAINT chk_approval_completion CHECK (
+        (approval_status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR
+        (approval_status != 'APPROVED')
+    ),
+    CONSTRAINT chk_version_dates CHECK (
+        (merge_completed_at IS NULL OR merge_completed_at >= created_at) AND
+        (rollback_completed_at IS NULL OR rollback_completed_at >= created_at)
+    )
+);
+
+
+-- Add approval workflow columns
+ALTER TABLE scheduling.schedule_version_control
+ADD COLUMN IF NOT EXISTS approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) DEFAULT 'PENDING'
+    CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED', 'BYPASSED')),
+ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP WITH TIME ZONE;
+
+-- Add compliance tracking columns
+ALTER TABLE scheduling.schedule_version_control
+ADD COLUMN IF NOT EXISTS compliance_check_performed BOOLEAN NOT NULL DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS compliance_violations JSONB DEFAULT '[]'::jsonb,
+ADD COLUMN IF NOT EXISTS compliance_approved BOOLEAN NOT NULL DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS compliance_approved_by UUID REFERENCES hr.employees(employee_id) ON DELETE SET NULL,
+ADD COLUMN IF NOT EXISTS compliance_approved_at TIMESTAMP WITH TIME ZONE;
+
+-- Add column comments for documentation
+COMMENT ON COLUMN scheduling.schedule_version_control.approval_status IS 
+'Current approval status in workflow (PENDING, APPROVED, REJECTED, BYPASSED)';
+
+COMMENT ON COLUMN scheduling.schedule_version_control.compliance_approved IS 
+'Indicates if compliance check was approved for this version';
+
+COMMENT ON COLUMN scheduling.schedule_version_control.compliance_approved_by IS 
+'Employee who approved compliance for this version';
+
+COMMENT ON COLUMN scheduling.schedule_version_control.compliance_approved_at IS 
+'Timestamp when compliance was approved';
+-- =============================================================================
+-- Indexes for Performance Optimization
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_schedule
+ON scheduling.schedule_version_control(schedule_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_parent
+ON scheduling.schedule_version_control(parent_version_id)
+WHERE parent_version_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_root
+ON scheduling.schedule_version_control(root_version_id)
+WHERE root_version_id IS NOT NULL;
+
+-- Branch and version indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_branch
+ON scheduling.schedule_version_control(branch_name, version_number)
+WHERE branch_name IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_type
+ON scheduling.schedule_version_control(version_type, status);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_current
+ON scheduling.schedule_version_control(schedule_id, is_current)
+WHERE is_current = TRUE;
+
+-- Status and lifecycle indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_stable
+ON scheduling.schedule_version_control(is_stable)
+WHERE is_stable = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_released
+ON scheduling.schedule_version_control(is_released)
+WHERE is_released = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_status
+ON scheduling.schedule_version_control(status, lifecycle_stage);
+
+-- Approval and validation indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_approval
+ON scheduling.schedule_version_control(approval_status, approved_at)
+WHERE approval_status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_validation
+ON scheduling.schedule_version_control(validation_status)
+WHERE validation_status IN ('INVALID', 'NEEDS_REVIEW');
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_created
+ON scheduling.schedule_version_control(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_committed
+ON scheduling.schedule_version_control(committed_at DESC)
+WHERE committed_at IS NOT NULL;
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_schedule_version_tags
+ON scheduling.schedule_version_control USING GIN(tags);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_diff
+ON scheduling.schedule_version_control USING GIN(diff_summary);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_changeset
+ON scheduling.schedule_version_control USING GIN(change_set);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_conflicts
+ON scheduling.schedule_version_control USING GIN(merge_conflicts);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_metadata
+ON scheduling.schedule_version_control USING GIN(metadata);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_schedule_version_schedule_status
+ON scheduling.schedule_version_control(schedule_id, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_branch_status
+ON scheduling.schedule_version_control(branch_name, status, version_number);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_approval_pending
+ON scheduling.schedule_version_control(approval_status, created_at)
+WHERE approval_status = 'PENDING';
+
+
+-- Indexes for approval and compliance columns
+CREATE INDEX IF NOT EXISTS idx_schedule_version_approval_status
+ON scheduling.schedule_version_control(approval_status, approved_at)
+WHERE approval_status = 'PENDING';
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_compliance_approved
+ON scheduling.schedule_version_control(compliance_check_performed, compliance_approved)
+WHERE compliance_check_performed = TRUE AND compliance_approved = FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_approved_by
+ON scheduling.schedule_version_control(approved_by)
+WHERE approved_by IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schedule_version_compliance_approved_by
+ON scheduling.schedule_version_control(compliance_approved_by)
+WHERE compliance_approved_by IS NOT NULL;
+
+-- =============================================================================
+-- Triggers for Automation
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_schedule_version_control_updated_at
+ON scheduling.schedule_version_control;
+
+CREATE TRIGGER trg_schedule_version_control_updated_at
+BEFORE UPDATE ON scheduling.schedule_version_control
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate version code
+CREATE OR REPLACE FUNCTION scheduling.generate_version_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_schedule_code VARCHAR(50);
+    v_sequence_number INTEGER;
+BEGIN
+    IF NEW.version_code IS NULL THEN
+        -- Get schedule code
+        SELECT schedule_code INTO v_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.schedule_id;
+        
+        -- Generate sequence number for this schedule
+        SELECT COALESCE(MAX(CAST(SUBSTRING(version_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.schedule_version_control
+        WHERE schedule_id = NEW.schedule_id
+        AND version_code LIKE 'VER-%-' || SUBSTRING(v_schedule_code FROM 5);
+        
+        -- Format version code: VER-SCHD-XXXXXX
+        NEW.version_code := 'VER-' || SUBSTRING(v_schedule_code FROM 5) || '-' ||
+                           LPAD(v_sequence_number::TEXT, 6, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_version_control_code
+ON scheduling.schedule_version_control;
+
+CREATE TRIGGER trg_schedule_version_control_code
+BEFORE INSERT ON scheduling.schedule_version_control
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_version_code();
+
+-- Trigger to validate version hierarchy
+CREATE OR REPLACE FUNCTION scheduling.validate_version_hierarchy()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Validate parent version exists and belongs to same schedule
+    IF NEW.parent_version_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM scheduling.schedule_version_control
+            WHERE version_id = NEW.parent_version_id
+            AND schedule_id = NEW.schedule_id
+        ) THEN
+            RAISE EXCEPTION 'Parent version must exist and belong to same schedule';
+        END IF;
+    END IF;
+    
+    -- Validate root version
+    IF NEW.root_version_id IS NOT NULL AND NEW.parent_version_id IS NULL THEN
+        NEW.root_version_id := NEW.version_id;
+    ELSIF NEW.root_version_id IS NULL AND NEW.parent_version_id IS NOT NULL THEN
+        SELECT root_version_id INTO NEW.root_version_id
+        FROM scheduling.schedule_version_control
+        WHERE version_id = NEW.parent_version_id;
+    END IF;
+    
+    -- Set is_current flag
+    IF NEW.status = 'ACTIVE' AND NEW.lifecycle_stage = 'PRODUCTION' THEN
+        -- Reset other current versions for this schedule
+        UPDATE scheduling.schedule_version_control
+        SET is_current = FALSE, updated_at = CURRENT_TIMESTAMP
+        WHERE schedule_id = NEW.schedule_id
+        AND version_id != NEW.version_id
+        AND is_current = TRUE;
+        
+        NEW.is_current := TRUE;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_schedule_version_control_hierarchy
+ON scheduling.schedule_version_control;
+
+CREATE TRIGGER trg_schedule_version_control_hierarchy
+BEFORE INSERT OR UPDATE OF parent_version_id, root_version_id, status, lifecycle_stage
+ON scheduling.schedule_version_control
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_version_hierarchy();
+
+-- =============================================================================
+-- Documentation Comments
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.schedule_version_control IS
+'Manages version history, branching, and merging of schedules with comprehensive change tracking and rollback capabilities.
+Complements scheduling.schedule_history by providing structured version management with branching capabilities for parallel
+schedule development. Supports collaborative editing, change approval workflows, and historical schedule reconstruction.
+Enables rollback to previous versions, merge conflict resolution, and version comparison for audit and compliance purposes.';
+
+COMMENT ON COLUMN scheduling.schedule_version_control.version_id IS 'Unique identifier for the version record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_version_control.version_code IS 'Business-readable version code (format: VER-SCHD-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_version_control.schedule_id IS 'Reference to the parent schedule';
+COMMENT ON COLUMN scheduling.schedule_version_control.parent_version_id IS 'Parent version for hierarchical versioning';
+COMMENT ON COLUMN scheduling.schedule_version_control.root_version_id IS 'Root version of the version tree';
+COMMENT ON COLUMN scheduling.schedule_version_control.schedule_history_id IS 'Reference to schedule_history for audit trail';
+COMMENT ON COLUMN scheduling.schedule_version_control.version_number IS 'Semantic version number (major.minor.patch)';
+COMMENT ON COLUMN scheduling.schedule_version_control.version_type IS 'Type of version change (MAJOR, MINOR, PATCH, etc.)';
+COMMENT ON COLUMN scheduling.schedule_version_control.branch_name IS 'Name of the version branch';
+COMMENT ON COLUMN scheduling.schedule_version_control.branch_type IS 'Type of branch (FEATURE, BUGFIX, RELEASE, etc.)';
+COMMENT ON COLUMN scheduling.schedule_version_control.commit_message IS 'Description of changes in this version';
+COMMENT ON COLUMN scheduling.schedule_version_control.commit_hash IS 'Git-style commit hash for reference';
+COMMENT ON COLUMN scheduling.schedule_version_control.is_current IS 'Indicates if this is the current active version';
+COMMENT ON COLUMN scheduling.schedule_version_control.diff_summary IS 'JSONB summary of changes from parent version';
+COMMENT ON COLUMN scheduling.schedule_version_control.full_snapshot IS 'Complete schedule snapshot for this version';
+COMMENT ON COLUMN scheduling.schedule_version_control.change_set IS 'Detailed list of changes in this version';
+COMMENT ON COLUMN scheduling.schedule_version_control.rollback_snapshot IS 'Snapshot data for rollback operations';
+COMMENT ON COLUMN scheduling.schedule_version_control.status IS 'Current version status (ACTIVE, ARCHIVED, MERGED, etc.)';
+COMMENT ON COLUMN scheduling.schedule_version_control.lifecycle_stage IS 'Development lifecycle stage';
+COMMENT ON COLUMN scheduling.schedule_version_control.merge_conflicts IS 'JSONB details of merge conflicts';
+COMMENT ON COLUMN scheduling.schedule_version_control.merge_resolution IS 'JSONB details of conflict resolutions';
+COMMENT ON COLUMN scheduling.schedule_version_control.rollback_reason IS 'Reason for version rollback';
+COMMENT ON COLUMN scheduling.schedule_version_control.approval_status IS 'Approval workflow status';
+COMMENT ON COLUMN scheduling.schedule_version_control.validation_status IS 'Version validation status';
+COMMENT ON COLUMN scheduling.schedule_version_control.compliance_violations IS 'JSONB list of compliance violations';
+COMMENT ON COLUMN scheduling.schedule_version_control.version_size_bytes IS 'Size of version snapshot in bytes';
+COMMENT ON COLUMN scheduling.schedule_version_control.comparison_time_ms IS 'Time to compare versions in milliseconds';
+--===========
+-- VIEWS
+--=================
+
+-- View for current version of each schedule
+CREATE OR REPLACE VIEW scheduling.vw_current_schedule_versions AS
+SELECT
+    svc.schedule_id,
+    s.schedule_code,
+    s.name AS schedule_name,
+    svc.version_id,
+    svc.version_code,
+    svc.version_number,
+    svc.version_type,
+    svc.branch_name,
+    svc.status,
+    svc.is_stable,
+    svc.is_released,
+    svc.approval_status,
+    svc.compliance_approved,
+    svc.created_at,
+    svc.committed_at,
+    svc.committed_by,
+    e.first_name || ' ' || e.last_name AS committed_by_name,
+    svc.metadata->>'commit_message' AS commit_message
+FROM scheduling.schedule_version_control svc
+JOIN scheduling.schedules s ON svc.schedule_id = s.schedule_id
+LEFT JOIN hr.employees e ON svc.committed_by = e.employee_id
+WHERE svc.is_current = TRUE
+AND svc.status = 'ACTIVE'
+ORDER BY s.schedule_code;
+
+COMMENT ON VIEW scheduling.vw_current_schedule_versions IS 
+'Current active version for each schedule with approval and compliance status';
+
+-- View for version history timeline
+CREATE OR REPLACE VIEW scheduling.vw_schedule_version_timeline AS
+SELECT
+    svc.schedule_id,
+    s.schedule_code,
+    svc.version_id,
+    svc.version_code,
+    svc.version_number,
+    svc.version_type,
+    svc.branch_name,
+    svc.parent_version_id,
+    svc.status,
+    svc.lifecycle_stage,
+    svc.commit_message,
+    svc.created_at,
+    svc.committed_at,
+    svc.approval_status,
+    svc.compliance_approved,
+    CASE 
+        WHEN svc.parent_version_id IS NULL THEN 0
+        ELSE (SELECT COUNT(*) FROM scheduling.schedule_version_control 
+              WHERE root_version_id = svc.root_version_id 
+              AND created_at < svc.created_at)
+    END AS version_depth,
+    e.first_name || ' ' || e.last_name AS created_by_name
+FROM scheduling.schedule_version_control svc
+JOIN scheduling.schedules s ON svc.schedule_id = s.schedule_id
+LEFT JOIN hr.employees e ON svc.created_by = e.employee_id
+ORDER BY svc.schedule_id, svc.created_at;
+
+COMMENT ON VIEW scheduling.vw_schedule_version_timeline IS 
+'Complete version history timeline for all schedules with hierarchy information';
+
+
+-- Verify columns were added successfully
+SELECT 
+    column_name, 
+    data_type, 
+    is_nullable,
+    column_default
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_version_control'
+AND column_name IN (
+    'approval_status', 
+    'compliance_approved', 
+    'compliance_approved_by',
+    'compliance_approved_at'
+)
+ORDER BY ordinal_position;
+
+-- Test the views
+SELECT * FROM scheduling.vw_current_schedule_versions LIMIT 5;
+SELECT * FROM scheduling.vw_schedule_version_timeline LIMIT 5;
+
+-- =============================================================================
+-- Serial No: 42 | TABLE: scheduling.real_time_schedule_adjustments
+-- =============================================================================
+-- Description: Tracks real-time schedule adjustments and dynamic changes
+-- Business Case: Enables real-time schedule adjustments in response to unexpected events,
+--                employee call-outs, demand spikes, or operational issues. Supports
+--                dynamic scheduling with immediate impact assessment and compliance checking.
+--                Reduces disruption and maintains operational continuity. Integrates with
+--                scheduling.schedule_exceptions for comprehensive change management and
+--                scheduling.schedule_compliance for real-time compliance validation.
+-- KPI: 1. Adjustment response time (<15 minutes), 2. Adjustment success rate (>90%),
+--      3. Real-time compliance check accuracy (>95%), 4. Impact assessment speed (<5 minutes),
+--      5. Employee notification speed (<2 minutes), 6. System availability for adjustments (>99.9%),
+--      7. Manager satisfaction with adjustment tools (>4/5)
+-- Feature Reference: F-SCH-044, F-SCH-045, F-OPS-001, F-COMM-006, F-COMP-005
+-- Dependencies: scheduling.schedules, scheduling.shifts, scheduling.shift_assignments,
+--               scheduling.schedule_exceptions, scheduling.schedule_compliance,
+--               hr.employees, operations.locations, communication.message_queues
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.real_time_schedule_adjustments (
+    -- Primary identifiers
+    adjustment_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    adjustment_code VARCHAR(50) UNIQUE NOT NULL
+        CHECK (adjustment_code ~ '^ADJ-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Adjustment context (aligned with existing schedule tables)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    schedule_exception_id UUID REFERENCES scheduling.schedule_exceptions(exception_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    department_id UUID REFERENCES hr.departments(department_id),
+    
+    -- Trigger event (comprehensive event types)
+    trigger_event VARCHAR(50) NOT NULL
+        CHECK (trigger_event IN ('EMPLOYEE_CALL_OUT', 'DEMAND_SPIKE', 'EQUIPMENT_FAILURE',
+                                'WEATHER_EVENT', 'SECURITY_INCIDENT', 'HEALTH_EMERGENCY',
+                                'TRANSPORTATION_ISSUE', 'MANAGER_REQUEST', 'AUTOMATED_OPTIMIZATION',
+                                'COMPLIANCE_VIOLATION', 'STAFFING_SHORTAGE', 'OVERSTAFFING',
+                                'SKILL_GAP', 'BUDGET_CONSTRAINT', 'CUSTOMER_REQUEST')),
+    
+    trigger_event_details JSONB DEFAULT '{}'::jsonb,
+    trigger_event_severity VARCHAR(20) NOT NULL DEFAULT 'MEDIUM'
+        CHECK (trigger_event_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+    
+    -- Adjustment details
+    adjustment_type VARCHAR(50) NOT NULL
+        CHECK (adjustment_type IN ('SHIFT_ADD', 'SHIFT_REMOVE', 'SHIFT_MODIFY', 'EMPLOYEE_REASSIGN',
+                                  'LOCATION_CHANGE', 'TIME_ADJUSTMENT', 'COVERAGE_REALLOCATION',
+                                  'SKILL_REALLOCATION', 'COST_OPTIMIZATION', 'EMERGENCY_COVERAGE')),
+    
+    adjustment_priority INTEGER NOT NULL DEFAULT 5
+        CHECK (adjustment_priority BETWEEN 1 AND 10),
+    
+    -- Affected entities (aligned with schedule_history)
+    affected_shifts UUID[] DEFAULT '{}',
+    affected_employees UUID[] DEFAULT '{}',
+    affected_positions UUID[] DEFAULT '{}',
+    original_assignments JSONB DEFAULT '{}'::jsonb,
+    new_assignments JSONB DEFAULT '{}'::jsonb,
+    assignment_changes JSONB DEFAULT '[]'::jsonb,
+    
+    -- Timing and urgency
+    detected_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    acknowledged_at TIMESTAMP WITH TIME ZONE,
+    response_deadline TIMESTAMP WITH TIME ZONE NOT NULL,
+    started_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    response_time INTERVAL GENERATED ALWAYS AS (
+        CASE
+            WHEN completed_at IS NOT NULL AND detected_at IS NOT NULL
+            THEN completed_at - detected_at
+            ELSE NULL
+        END
+    ) STORED,
+    
+    -- Status tracking (aligned with schedule_exceptions)
+    status VARCHAR(20) NOT NULL DEFAULT 'DETECTED'
+        CHECK (status IN ('DETECTED', 'ANALYZING', 'PLANNING', 'PENDING_APPROVAL', 'APPROVED',
+                         'EXECUTING', 'COMPLETED', 'FAILED', 'ESCALATED', 'CANCELLED')),
+    execution_status VARCHAR(20)
+        CHECK (execution_status IN ('AUTO_EXECUTED', 'MANUAL_EXECUTION', 'PARTIAL_EXECUTION', 'PENDING')),
+    
+    -- Impact assessment
+    business_impact VARCHAR(20) NOT NULL CHECK (business_impact IN ('MINIMAL', 'MODERATE', 'SIGNIFICANT', 'CRITICAL')),
+    operational_impact TEXT,
+    financial_impact NUMERIC(15,2) CHECK (financial_impact >= 0),
+    customer_impact VARCHAR(20) CHECK (customer_impact IN ('NONE', 'LOW', 'MEDIUM', 'HIGH')),
+    employee_impact VARCHAR(20) CHECK (employee_impact IN ('NONE', 'LOW', 'MEDIUM', 'HIGH')),
+    coverage_impact NUMERIC(5,2) CHECK (coverage_impact BETWEEN -100 AND 100),
+    cost_impact NUMERIC(15,2),
+    
+    -- Resolution details
+    resolution_strategy VARCHAR(100),
+    resolution_actions JSONB DEFAULT '[]'::jsonb,
+    resolution_effectiveness VARCHAR(20)
+        CHECK (resolution_effectiveness IN ('FULL', 'PARTIAL', 'MINIMAL', 'NONE')),
+    alternative_options JSONB DEFAULT '[]'::jsonb,
+    
+    -- Compliance check (aligned with schedule_compliance)
+    compliance_check_performed BOOLEAN NOT NULL DEFAULT FALSE,
+    compliance_check_at TIMESTAMP WITH TIME ZONE,
+    compliance_violations JSONB DEFAULT '[]'::jsonb,
+    compliance_override_approved BOOLEAN NOT NULL DEFAULT FALSE,
+    compliance_override_reason TEXT,
+    compliance_override_approved_by UUID REFERENCES hr.employees(employee_id),
+    compliance_override_approved_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Approval workflow
+    requires_approval BOOLEAN NOT NULL DEFAULT TRUE,
+    approval_level INTEGER DEFAULT 1 CHECK (approval_level BETWEEN 1 AND 5),
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    approval_notes TEXT,
+    
+    -- Communication tracking (aligned with communication.message_queues)
+    notifications_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    notification_queue_ids UUID[] DEFAULT '{}',
+    acknowledgments_required INTEGER DEFAULT 0,
+    acknowledgments_received INTEGER DEFAULT 0,
+    acknowledgment_rate NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN acknowledgments_required > 0
+            THEN (acknowledgments_received::NUMERIC / acknowledgments_required * 100)
+            ELSE 100
+        END
+    ) STORED,
+    
+    -- Automation metrics
+    is_automated BOOLEAN NOT NULL DEFAULT FALSE,
+    automation_rule_id UUID,
+    automation_confidence_score NUMERIC(5,2) CHECK (automation_confidence_score BETWEEN 0 AND 100),
+    manual_override BOOLEAN NOT NULL DEFAULT FALSE,
+    manual_override_reason TEXT,
+    manual_override_by UUID REFERENCES hr.employees(employee_id),
+    
+    -- Performance metrics
+    processing_time_ms INTEGER CHECK (processing_time_ms >= 0),
+    algorithm_used VARCHAR(50),
+    optimization_score NUMERIC(5,2) CHECK (optimization_score BETWEEN 0 AND 100),
+    
+    -- Rollback capability
+    is_reversible BOOLEAN NOT NULL DEFAULT TRUE,
+    rollback_adjustment_id UUID REFERENCES scheduling.real_time_schedule_adjustments(adjustment_id),
+    rollback_completed_at TIMESTAMP WITH TIME ZONE,
+    rollback_reason TEXT,
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    executed_by UUID REFERENCES hr.employees(employee_id),
+    executed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    
+    -- Constraints
+    CONSTRAINT chk_adjustment_timing CHECK (
+        response_deadline > detected_at AND
+        (completed_at IS NULL OR completed_at >= detected_at) AND
+        (started_at IS NULL OR started_at >= detected_at)
+    ),
+    CONSTRAINT chk_resolution_completion CHECK (
+        (status = 'COMPLETED' AND completed_at IS NOT NULL) OR
+        (status != 'COMPLETED')
+    ),
+    CONSTRAINT chk_affected_entities CHECK (
+        array_length(affected_shifts, 1) > 0 OR
+        array_length(affected_employees, 1) > 0 OR
+        array_length(affected_positions, 1) > 0
+    ),
+    CONSTRAINT chk_approval_completion CHECK (
+        (status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR
+        (status != 'APPROVED')
+    ),
+    CONSTRAINT chk_compliance_override CHECK (
+        (compliance_override_approved = TRUE AND compliance_override_approved_by IS NOT NULL
+         AND compliance_override_approved_at IS NOT NULL AND compliance_override_reason IS NOT NULL) OR
+        (compliance_override_approved = FALSE)
+    ),
+    CONSTRAINT chk_notification_tracking CHECK (
+        acknowledgments_received <= acknowledgments_required
+    )
+);
+
+-- =============================================================================
+-- Indexes for Performance Optimization
+-- =============================================================================
+
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_schedule
+ON scheduling.real_time_schedule_adjustments(schedule_id, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_location
+ON scheduling.real_time_schedule_adjustments(location_id, detected_at DESC)
+WHERE location_id IS NOT NULL;
+
+
+-- Trigger and status indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_trigger
+ON scheduling.real_time_schedule_adjustments(trigger_event, trigger_event_severity, status);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_status
+ON scheduling.real_time_schedule_adjustments(status, response_deadline);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_pending
+ON scheduling.real_time_schedule_adjustments(status, detected_at)
+WHERE status IN ('DETECTED', 'ANALYZING', 'PLANNING', 'PENDING_APPROVAL');
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_urgent
+ON scheduling.real_time_schedule_adjustments(response_deadline, status)
+WHERE status IN ('DETECTED', 'ANALYZING', 'PLANNING', 'EXECUTING');
+
+-- Impact and priority indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_impact
+ON scheduling.real_time_schedule_adjustments(business_impact, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_priority
+ON scheduling.real_time_schedule_adjustments(adjustment_priority, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_severity
+ON scheduling.real_time_schedule_adjustments(trigger_event_severity, status);
+
+-- Time-based indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_detected
+ON scheduling.real_time_schedule_adjustments(detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_response
+ON scheduling.real_time_schedule_adjustments(response_time)
+WHERE response_time IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_completed
+ON scheduling.real_time_schedule_adjustments(completed_at DESC)
+WHERE completed_at IS NOT NULL;
+
+-- Compliance and approval indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_compliance
+ON scheduling.real_time_schedule_adjustments(compliance_check_performed, compliance_violations)
+WHERE compliance_check_performed = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_compliance_violations
+ON scheduling.real_time_schedule_adjustments USING GIN(compliance_violations)
+WHERE jsonb_array_length(compliance_violations) > 0;
+
+
+-- Automation indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_automated
+ON scheduling.real_time_schedule_adjustments(is_automated, automation_confidence_score)
+WHERE is_automated = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_override
+ON scheduling.real_time_schedule_adjustments(manual_override)
+WHERE manual_override = TRUE;
+
+-- JSONB and array indexes
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_affected_shifts
+ON scheduling.real_time_schedule_adjustments USING GIN(affected_shifts);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_affected_employees
+ON scheduling.real_time_schedule_adjustments USING GIN(affected_employees);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_original_assignments
+ON scheduling.real_time_schedule_adjustments USING GIN(original_assignments);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_new_assignments
+ON scheduling.real_time_schedule_adjustments USING GIN(new_assignments);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_resolution
+ON scheduling.real_time_schedule_adjustments USING GIN(resolution_actions);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_metadata
+ON scheduling.real_time_schedule_adjustments USING GIN(metadata);
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_schedule_status
+ON scheduling.real_time_schedule_adjustments(schedule_id, status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_trigger_status
+ON scheduling.real_time_schedule_adjustments(trigger_event, status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_deadline_pending
+ON scheduling.real_time_schedule_adjustments(response_deadline, adjustment_priority)
+WHERE status IN ('DETECTED', 'ANALYZING', 'PLANNING', 'PENDING_APPROVAL');
+
+CREATE INDEX IF NOT EXISTS idx_real_time_adjustments_employee_impact
+ON scheduling.real_time_schedule_adjustments USING GIN(affected_employees)
+WHERE array_length(affected_employees, 1) > 0;
+
+-- =============================================================================
+-- Triggers for Automation
+-- =============================================================================
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS trg_real_time_adjustments_updated_at
+ON scheduling.real_time_schedule_adjustments;
+
+CREATE TRIGGER trg_real_time_adjustments_updated_at
+BEFORE UPDATE ON scheduling.real_time_schedule_adjustments
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to auto-generate adjustment code
+CREATE OR REPLACE FUNCTION scheduling.generate_adjustment_code()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_schedule_code VARCHAR(50);
+    v_sequence_number INTEGER;
+BEGIN
+    IF NEW.adjustment_code IS NULL THEN
+        -- Get schedule code
+        SELECT schedule_code INTO v_schedule_code
+        FROM scheduling.schedules
+        WHERE schedule_id = NEW.schedule_id;
+        
+        -- Generate sequence number for today
+        SELECT COALESCE(MAX(CAST(SUBSTRING(adjustment_code FROM 13) AS INTEGER)), 0) + 1
+        INTO v_sequence_number
+        FROM scheduling.real_time_schedule_adjustments
+        WHERE schedule_id = NEW.schedule_id
+        AND adjustment_code LIKE 'ADJ-%-' || TO_CHAR(CURRENT_DATE, 'YYYYMMDD') || '%';
+        
+        -- Format adjustment code: ADJ-SCHD-YYYYMMDD-###
+        NEW.adjustment_code := 'ADJ-' || SUBSTRING(v_schedule_code FROM 5) || '-' ||
+                              TO_CHAR(CURRENT_DATE, 'YYYYMMDD') || '-' ||
+                              LPAD(v_sequence_number::TEXT, 3, '0');
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_real_time_adjustments_code
+ON scheduling.real_time_schedule_adjustments;
+
+CREATE TRIGGER trg_real_time_adjustments_code
+BEFORE INSERT ON scheduling.real_time_schedule_adjustments
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.generate_adjustment_code();
+
+-- Trigger to validate adjustment and set defaults
+CREATE OR REPLACE FUNCTION scheduling.validate_adjustment()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Set response deadline based on severity if not provided
+    IF NEW.response_deadline IS NULL THEN
+        CASE NEW.trigger_event_severity
+            WHEN 'CRITICAL' THEN
+                NEW.response_deadline := NEW.detected_at + INTERVAL '15 minutes';
+            WHEN 'HIGH' THEN
+                NEW.response_deadline := NEW.detected_at + INTERVAL '1 hour';
+            WHEN 'MEDIUM' THEN
+                NEW.response_deadline := NEW.detected_at + INTERVAL '4 hours';
+            WHEN 'LOW' THEN
+                NEW.response_deadline := NEW.detected_at + INTERVAL '24 hours';
+            ELSE
+                NEW.response_deadline := NEW.detected_at + INTERVAL '4 hours';
+        END CASE;
+    END IF;
+    
+    -- Set requires_approval based on impact
+    IF NEW.requires_approval IS NULL THEN
+        IF NEW.business_impact IN ('SIGNIFICANT', 'CRITICAL') OR
+           NEW.financial_impact > 1000 OR
+           NEW.compliance_violations != '[]'::jsonb THEN
+            NEW.requires_approval := TRUE;
+            NEW.approval_level := 3;
+        ELSE
+            NEW.requires_approval := FALSE;
+        END IF;
+    END IF;
+    
+    -- Validate affected entities
+    IF array_length(NEW.affected_shifts, 1) IS NULL AND
+       array_length(NEW.affected_employees, 1) IS NULL AND
+       array_length(NEW.affected_positions, 1) IS NULL THEN
+        RAISE EXCEPTION 'At least one affected entity must be specified';
+    END IF;
+    
+    -- Set started_at when status changes to EXECUTING
+    IF TG_OP = 'UPDATE' AND
+       OLD.status != 'EXECUTING' AND NEW.status = 'EXECUTING' AND
+       NEW.started_at IS NULL THEN
+        NEW.started_at := CURRENT_TIMESTAMP;
+    END IF;
+    
+    -- Set completed_at when status changes to COMPLETED
+    IF TG_OP = 'UPDATE' AND
+       OLD.status != 'COMPLETED' AND NEW.status = 'COMPLETED' AND
+       NEW.completed_at IS NULL THEN
+        NEW.completed_at := CURRENT_TIMESTAMP;
+        NEW.executed_at := CURRENT_TIMESTAMP;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_real_time_adjustments_validate
+ON scheduling.real_time_schedule_adjustments;
+
+CREATE TRIGGER trg_real_time_adjustments_validate
+BEFORE INSERT OR UPDATE OF status, trigger_event_severity, business_impact, financial_impact
+ON scheduling.real_time_schedule_adjustments
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.validate_adjustment();
+
+-- Trigger to create schedule history entry
+CREATE OR REPLACE FUNCTION scheduling.create_adjustment_history()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Create history entry when adjustment is completed
+    IF TG_OP = 'UPDATE' AND
+       OLD.status != 'COMPLETED' AND NEW.status = 'COMPLETED' THEN
+        INSERT INTO scheduling.schedule_history (
+            schedule_id,
+            entity_type,
+            entity_id,
+            change_type,
+            changed_fields,
+            changed_data,
+            change_summary,
+            change_reason,
+            business_justification,
+            impact_assessment,
+            affected_employees,
+            affected_shifts,
+            compliance_impact,
+            cost_impact,
+            change_source,
+            change_method,
+            changed_by,
+            changed_at,
+            metadata
+        ) VALUES (
+            NEW.schedule_id,
+            'ADJUSTMENT',
+            NEW.adjustment_id,
+            'UPDATED',
+            ARRAY['real_time_adjustment'],
+            jsonb_build_object(
+                'adjustment_id', NEW.adjustment_id,
+                'adjustment_type', NEW.adjustment_type,
+                'trigger_event', NEW.trigger_event,
+                'affected_shifts', NEW.affected_shifts,
+                'affected_employees', NEW.affected_employees
+            ),
+            jsonb_build_object(
+                'adjustment_id', NEW.adjustment_id,
+                'original_assignments', NEW.original_assignments,
+                'new_assignments', NEW.new_assignments
+            ),
+            format('Real-time adjustment: %s due to %s', NEW.adjustment_type, NEW.trigger_event),
+            NEW.operational_impact,
+            UPPER(NEW.business_impact),
+            NEW.affected_employees,
+            NEW.affected_shifts,
+            (NEW.compliance_violations != '[]'::jsonb),
+            NEW.cost_impact,
+            CASE WHEN NEW.is_automated THEN 'AUTOMATED' ELSE 'USER' END,
+            CASE WHEN NEW.is_automated THEN 'ALGORITHM' ELSE 'MANUAL' END,
+            NEW.executed_by,
+            NEW.completed_at,
+            jsonb_build_object('adjustment_id', NEW.adjustment_id)
+        );
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_real_time_adjustments_history
+ON scheduling.real_time_schedule_adjustments;
+
+CREATE TRIGGER trg_real_time_adjustments_history
+AFTER UPDATE OF status ON scheduling.real_time_schedule_adjustments
+FOR EACH ROW
+WHEN (OLD.status != 'COMPLETED' AND NEW.status = 'COMPLETED')
+EXECUTE FUNCTION scheduling.create_adjustment_history();
+
+-- =============================================================================
+-- Documentation Comments
+-- =============================================================================
+
+COMMENT ON TABLE scheduling.real_time_schedule_adjustments IS
+'Tracks real-time schedule adjustments and dynamic changes with impact assessment and compliance checking.
+Enables real-time schedule adjustments in response to unexpected events, employee call-outs, demand spikes,
+or operational issues. Supports dynamic scheduling with immediate impact assessment and compliance validation.
+Integrates with scheduling.schedule_exceptions for comprehensive change management and scheduling.schedule_compliance
+for real-time compliance validation. Reduces disruption and maintains operational continuity through rapid
+response capabilities, automated adjustments, and comprehensive audit trails.';
+
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.adjustment_id IS 'Unique identifier for the adjustment record (UUID)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.adjustment_code IS 'Business-readable adjustment code (format: ADJ-SCHD-YYYYMMDD-###)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.schedule_id IS 'Reference to the affected schedule';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.schedule_exception_id IS 'Reference to related schedule exception if applicable';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.trigger_event IS 'Event that triggered the adjustment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.trigger_event_severity IS 'Severity level of the trigger event';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.adjustment_type IS 'Type of adjustment being made';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.adjustment_priority IS 'Priority level (1-10, 1=highest)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.affected_shifts IS 'Array of shift IDs affected by this adjustment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.affected_employees IS 'Array of employee IDs affected by this adjustment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.original_assignments IS 'JSONB snapshot of assignments before adjustment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.new_assignments IS 'JSONB snapshot of assignments after adjustment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.response_time IS 'Calculated time from detection to completion (auto-generated)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.status IS 'Current adjustment status in workflow';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.execution_status IS 'How the adjustment was executed (auto/manual)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.business_impact IS 'Overall business impact assessment';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.financial_impact IS 'Estimated financial impact in currency units';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.coverage_impact IS 'Percentage impact on coverage (-100 to +100)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.resolution_actions IS 'JSONB array of actions taken to resolve';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.compliance_violations IS 'JSONB array of compliance violations detected';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.compliance_override_approved IS 'Indicates if compliance violations were overridden';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.notification_queue_ids IS 'Array of message queue IDs for notifications sent';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.acknowledgment_rate IS 'Percentage of required acknowledgments received (auto-generated)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.is_automated IS 'Indicates if adjustment was processed automatically';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.automation_confidence_score IS 'Confidence score of automated adjustment (0-100)';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.is_reversible IS 'Indicates if adjustment can be rolled back';
+COMMENT ON COLUMN scheduling.real_time_schedule_adjustments.rollback_adjustment_id IS 'Reference to rollback adjustment if executed';
+
+-- =============================================================================
+-- Helper Views for Common Queries
+-- =============================================================================
+
+-- View for pending adjustments requiring attention
+CREATE OR REPLACE VIEW scheduling.vw_pending_adjustments AS
+SELECT
+    adjustment_id,
+    adjustment_code,
+    schedule_id,
+    trigger_event,
+    trigger_event_severity,
+    adjustment_type,
+    adjustment_priority,
+    status,
+    detected_at,
+    response_deadline,
+    EXTRACT(EPOCH FROM (response_deadline - CURRENT_TIMESTAMP)) / 60 AS minutes_until_deadline,
+    business_impact,
+    financial_impact,
+    requires_approval,
+   is_automated,
+    created_by,
+    metadata
+FROM scheduling.real_time_schedule_adjustments
+WHERE status IN ('DETECTED', 'ANALYZING', 'PLANNING', 'PENDING_APPROVAL')
+ORDER BY
+    CASE trigger_event_severity
+        WHEN 'CRITICAL' THEN 1
+        WHEN 'HIGH' THEN 2
+        WHEN 'MEDIUM' THEN 3
+        ELSE 4
+    END,
+    response_deadline ASC;
+
+COMMENT ON VIEW scheduling.vw_pending_adjustments IS
+'View of pending adjustments requiring attention, ordered by severity and deadline';
+
+-- View for adjustment performance metrics
+CREATE OR REPLACE VIEW scheduling.vw_adjustment_performance AS
+SELECT
+    DATE_TRUNC('day', detected_at) AS adjustment_date,
+    trigger_event,
+    adjustment_type,
+    COUNT(*) AS total_adjustments,
+    COUNT(CASE WHEN status = 'COMPLETED' THEN 1 END) AS completed_adjustments,
+    COUNT(CASE WHEN status = 'FAILED' THEN 1 END) AS failed_adjustments,
+    ROUND(AVG(EXTRACT(EPOCH FROM response_time) / 60), 2) AS avg_response_time_minutes,
+    ROUND(AVG(financial_impact), 2) AS avg_financial_impact,
+    COUNT(CASE WHEN is_automated = TRUE THEN 1 END) AS automated_count,
+    ROUND(
+        COUNT(CASE WHEN is_automated = TRUE THEN 1 END)::NUMERIC /
+        NULLIF(COUNT(*), 0) * 100, 2
+    ) AS automation_rate,
+    COUNT(CASE WHEN compliance_violations != '[]'::jsonb THEN 1 END) AS compliance_violation_count
+FROM scheduling.real_time_schedule_adjustments
+WHERE detected_at >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY DATE_TRUNC('day', detected_at), trigger_event, adjustment_type
+ORDER BY adjustment_date DESC, total_adjustments DESC;
+
+COMMENT ON VIEW scheduling.vw_adjustment_performance IS
+'Performance metrics for real-time adjustments over time';
+
+-- =============================================================================
+-- Permission Grants
+-- =============================================================================
+
+-- GRANT SELECT ON scheduling.schedule_version_control TO reporting_role, manager_role, admin_role, hr_role;
+-- GRANT INSERT, UPDATE ON scheduling.schedule_version_control TO manager_role, admin_role, hr_role;
+-- GRANT DELETE ON scheduling.schedule_version_control TO admin_role;
+
+-- GRANT SELECT ON scheduling.real_time_schedule_adjustments TO reporting_role, manager_role, admin_role, hr_role, operations_role;
+-- GRANT INSERT, UPDATE ON scheduling.real_time_schedule_adjustments TO manager_role, admin_role, hr_role, operations_role;
+-- GRANT DELETE ON scheduling.real_time_schedule_adjustments TO admin_role;
+
+-- GRANT SELECT ON scheduling.vw_pending_adjustments TO manager_role, admin_role, hr_role, operations_role;
+-- GRANT SELECT ON scheduling.vw_adjustment_performance TO reporting_role, manager_role, admin_role;
+
+-- =============================================================================
+-- Verification Queries
+-- =============================================================================
+
+-- Verify tables exist
+SELECT table_name, table_schema
+FROM information_schema.tables
+WHERE table_name IN ('schedule_version_control', 'real_time_schedule_adjustments')
+AND table_schema = 'scheduling';
+
+-- Verify columns
+SELECT table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name IN ('schedule_version_control', 'real_time_schedule_adjustments')
+ORDER BY table_name, ordinal_position;
+
+-- Verify indexes
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND tablename IN ('schedule_version_control', 'real_time_schedule_adjustments')
+ORDER BY tablename, indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_manipulation, action_timing, event_object_table
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table IN ('schedule_version_control', 'real_time_schedule_adjustments');
+
+
+-- =============================================================================
+-- 1. ENUMERATED TYPES (Aligned with Schema Standards)
+-- =============================================================================
+
+-- Export format types
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'export_format_enum') THEN
+CREATE TYPE scheduling.export_format_enum AS ENUM (
+    'CSV', 'EXCEL', 'XML', 'JSON', 'PDF', 'ICAL', 'CUSTOM'
+);
+RAISE NOTICE 'Created enum type: scheduling.export_format_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.export_format_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.export_format_enum IS 
+'Defines supported export formats for schedule data.
+CSV: Comma-separated values; EXCEL: Microsoft Excel format;
+XML: Extensible Markup Language; JSON: JavaScript Object Notation;
+PDF: Portable Document Format; ICAL: iCalendar format;
+CUSTOM: Organization-specific format';
+
+-- Target system types
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'export_target_system_enum') THEN
+CREATE TYPE scheduling.export_target_system_enum AS ENUM (
+    'PAYROLL', 'TIME_CLOCK', 'HRIS', 'ERP', 'BI_TOOL', 
+    'REGULATORY', 'PARTNER', 'CUSTOM'
+);
+RAISE NOTICE 'Created enum type: scheduling.export_target_system_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.export_target_system_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.export_target_system_enum IS 
+'Defines target systems for schedule exports.
+PAYROLL: Payroll processing systems; TIME_CLOCK: Time tracking systems;
+HRIS: Human Resources Information Systems; ERP: Enterprise Resource Planning;
+BI_TOOL: Business Intelligence tools; REGULATORY: Regulatory reporting;
+PARTNER: External partner systems; CUSTOM: Custom integrations';
+
+-- Workload distribution status
+DO $$BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'workload_status_enum') THEN
+CREATE TYPE scheduling.workload_status_enum AS ENUM (
+    'ANALYZED', 'REVIEWED', 'OPTIMIZED', 'IMPLEMENTED', 'MONITORING'
+);
+RAISE NOTICE 'Created enum type: scheduling.workload_status_enum';
+ELSE
+RAISE NOTICE 'Enum type scheduling.workload_status_enum already exists';
+END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.workload_status_enum IS 
+'Defines workflow status for workload distribution analysis.
+ANALYZED: Initial analysis complete; REVIEWED: Management review complete;
+OPTIMIZED: Optimization applied; IMPLEMENTED: Changes deployed;
+MONITORING: Ongoing monitoring active';
+
+-- =============================================================================
+-- ENUM TYPES FOR EXPORT TEMPLATES
+-- =============================================================================
+-- Create export_format_enum if not exists
+DO $$BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'export_format_enum') THEN
+        CREATE TYPE scheduling.export_format_enum AS ENUM (
+            'CSV',
+            'EXCEL',
+            'XML',
+            'JSON',
+            'PDF',
+            'ICAL',
+            'EDI',
+            'CUSTOM'
+        );
+        RAISE NOTICE 'Created enum type: scheduling.export_format_enum';
+    ELSE
+        RAISE NOTICE 'Enum type scheduling.export_format_enum already exists';
+    END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.export_format_enum IS 
+'Defines supported export file formats for schedule exports';
+
+-- Create export_target_system_enum if not exists
+DO $$BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'export_target_system_enum') THEN
+        CREATE TYPE scheduling.export_target_system_enum AS ENUM (
+            'PAYROLL',
+            'TIME_CLOCK',
+            'HRIS',
+            'ERP',
+            'ACCOUNTING',
+            'COMPLIANCE',
+            'ANALYTICS',
+            'PARTNER',
+            'REGULATORY',
+            'CUSTOM'
+        );
+        RAISE NOTICE 'Created enum type: scheduling.export_target_system_enum';
+    ELSE
+        RAISE NOTICE 'Enum type scheduling.export_target_system_enum already exists';
+    END IF;
+END$$;
+
+COMMENT ON TYPE scheduling.export_target_system_enum IS 
+'Defines target systems for schedule exports';
+-- =============================================================================
+-- 2. TABLE: scheduling.schedule_export_templates
+-- =============================================================================
+-- Serial No: 43 | TABLE: scheduling.schedule_export_templates
+-- Description: Manages templates for exporting schedules to various formats and systems
+-- Business Case: Enables standardized export of schedules to payroll systems, time clocks,
+--                external partners, and regulatory bodies. Supports multiple formats
+--                (CSV, Excel, XML, JSON) and custom mappings. Reduces manual export effort
+--                and ensures data consistency across systems.
+-- KPI: 1. Export success rate (>99%), 2. Export automation rate (>90%),
+--      3. Data transformation accuracy (>99.9%), 4. Export generation time (<30 seconds),
+--      5. Format compatibility rate (>95%), 6. System integration success rate (>98%),
+--      7. User satisfaction with exports (>4/5)
+-- Feature Reference: F-EXP-001, F-EXP-002, F-EXP-003, F-EXP-004, F-EXP-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.schedule_export_templates CASCADE;
+
+CREATE TABLE scheduling.schedule_export_templates (
+    -- Primary identifiers
+    template_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    template_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (template_code ~ '^EXT-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Template details
+    template_name VARCHAR(200) NOT NULL,
+    description TEXT,
+    export_format scheduling.export_format_enum NOT NULL,
+    target_system scheduling.export_target_system_enum NOT NULL,
+    system_version VARCHAR(50),
+    
+    -- Template configuration
+    field_mappings JSONB NOT NULL DEFAULT '{}'::jsonb,
+    data_transformations JSONB DEFAULT '{}'::jsonb,
+    format_options JSONB DEFAULT '{}'::jsonb,
+    validation_rules JSONB DEFAULT '{}'::jsonb,
+    
+    -- Scheduling and filtering
+    schedule_filters JSONB DEFAULT '{}'::jsonb,
+    date_range_type VARCHAR(20) 
+        CHECK (date_range_type IN ('SCHEDULE_PERIOD', 'ROLLING', 'FIXED', 'CUSTOM')),
+    included_fields TEXT[] DEFAULT '{}',
+    excluded_fields TEXT[] DEFAULT '{}',
+    
+    -- Status and versioning
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    
+    -- Usage tracking
+    usage_count INTEGER NOT NULL DEFAULT 0 CHECK (usage_count >= 0),
+    last_used_at TIMESTAMP WITH TIME ZONE,
+    success_count INTEGER NOT NULL DEFAULT 0 CHECK (success_count >= 0),
+    failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+    
+    -- Performance metrics
+    average_export_time INTERVAL,
+    average_file_size_bytes INTEGER CHECK (average_file_size_bytes >= 0),
+    
+    -- Compliance and security
+    data_privacy_level VARCHAR(20) NOT NULL DEFAULT 'INTERNAL'
+        CHECK (data_privacy_level IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    encryption_required BOOLEAN NOT NULL DEFAULT FALSE,
+    access_control_list JSONB DEFAULT '{}'::jsonb,
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    validated_by UUID REFERENCES hr.employees(employee_id),
+    validated_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_export_template_usage 
+        CHECK (success_count + failure_count = usage_count),
+    CONSTRAINT chk_template_validation 
+        CHECK (
+            (validated_by IS NOT NULL AND validated_at IS NOT NULL) OR
+            (validated_by IS NULL AND validated_at IS NULL)
+        ),
+    CONSTRAINT chk_template_dates 
+        CHECK (validated_at IS NULL OR validated_at >= created_at)
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (Aligned with Schema Standards)
+-- =============================================================================
+-- Primary lookup indexes
+CREATE INDEX IF NOT EXISTS idx_export_templates_format
+    ON scheduling.schedule_export_templates(export_format, is_active);
+CREATE INDEX IF NOT EXISTS idx_export_templates_target
+    ON scheduling.schedule_export_templates(target_system, system_version);
+CREATE INDEX IF NOT EXISTS idx_export_templates_active
+    ON scheduling.schedule_export_templates(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_export_templates_usage
+    ON scheduling.schedule_export_templates(usage_count DESC);
+
+-- JSONB indexes for flexible querying
+CREATE INDEX IF NOT EXISTS idx_export_templates_mappings
+    ON scheduling.schedule_export_templates USING GIN(field_mappings);
+CREATE INDEX IF NOT EXISTS idx_export_templates_metadata
+    ON scheduling.schedule_export_templates USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_export_templates_tags
+    ON scheduling.schedule_export_templates USING GIN(tags);
+
+-- Organizational context indexes
+CREATE INDEX IF NOT EXISTS idx_export_templates_department
+    ON scheduling.schedule_export_templates(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_export_templates_location
+    ON scheduling.schedule_export_templates(location_id) 
+    WHERE location_id IS NOT NULL;
+
+-- Audit indexes
+CREATE INDEX IF NOT EXISTS idx_export_templates_created_by
+    ON scheduling.schedule_export_templates(created_by, created_at DESC);
+
+-- =============================================================================
+-- PARTIAL UNIQUE INDEX (Replaces EXCLUDE Constraint)
+-- =============================================================================
+-- This ensures only ONE default template per target_system
+-- Works with ENUM types unlike EXCLUDE USING GIST
+CREATE UNIQUE INDEX IF NOT EXISTS idx_export_templates_unique_default
+    ON scheduling.schedule_export_templates(target_system)
+    WHERE is_default = TRUE AND is_active = TRUE;
+
+COMMENT ON INDEX scheduling.idx_export_templates_unique_default IS 
+'Ensures only one active default template per target system (replaces EXCLUDE constraint)';
+
+-- =============================================================================
+-- TRIGGER FOR UPDATED_AT (Aligned with Schema Standards)
+-- =============================================================================
+DROP TRIGGER IF EXISTS trg_schedule_export_templates_updated_at 
+    ON scheduling.schedule_export_templates;
+CREATE TRIGGER trg_schedule_export_templates_updated_at
+    BEFORE UPDATE ON scheduling.schedule_export_templates
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- =============================================================================
+-- TRIGGER TO UPDATE USAGE STATISTICS
+-- =============================================================================
+CREATE OR REPLACE FUNCTION scheduling.update_export_template_usage()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Update usage statistics when export is completed
+    IF NEW.status = 'COMPLETED' AND OLD.status != 'COMPLETED' THEN
+        UPDATE scheduling.schedule_export_templates
+        SET 
+            usage_count = usage_count + 1,
+            success_count = success_count + 1,
+            last_used_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE template_id = NEW.template_id;
+    ELSIF NEW.status = 'FAILED' AND OLD.status != 'FAILED' THEN
+        UPDATE scheduling.schedule_export_templates
+        SET 
+            usage_count = usage_count + 1,
+            failure_count = failure_count + 1,
+            last_used_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE template_id = NEW.template_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION scheduling.update_export_template_usage IS 
+'Updates export template usage statistics when exports complete';
+
+-- =============================================================================
+-- COMMENTS (Aligned with Schema Documentation Standards)
+-- =============================================================================
+COMMENT ON TABLE scheduling.schedule_export_templates IS 
+'Manages templates for exporting schedules to various formats and external systems.
+Enables standardized export of schedules to payroll systems, time clocks, external partners,
+and regulatory bodies. Supports multiple formats (CSV, Excel, XML, JSON) and custom mappings.
+Reduces manual export effort and ensures data consistency across systems. Aligned with
+enterprise data governance and security standards.';
+
+COMMENT ON COLUMN scheduling.schedule_export_templates.template_id IS 
+'Unique identifier for the export template (UUID)';
+COMMENT ON COLUMN scheduling.schedule_export_templates.template_code IS 
+'Business-readable template code (format: EXT-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_export_templates.export_format IS 
+'Export file format (CSV, EXCEL, XML, JSON, PDF, ICAL, CUSTOM)';
+COMMENT ON COLUMN scheduling.schedule_export_templates.target_system IS 
+'Target system for export (PAYROLL, TIME_CLOCK, HRIS, ERP, etc.)';
+COMMENT ON COLUMN scheduling.schedule_export_templates.field_mappings IS 
+'JSONB mapping of source fields to export fields';
+COMMENT ON COLUMN scheduling.schedule_export_templates.data_privacy_level IS 
+'Data sensitivity classification for export security';
+COMMENT ON COLUMN scheduling.schedule_export_templates.usage_count IS 
+'Total number of times template has been used';
+COMMENT ON COLUMN scheduling.schedule_export_templates.success_count IS 
+'Number of successful export operations';
+COMMENT ON COLUMN scheduling.schedule_export_templates.failure_count IS 
+'Number of failed export operations';
+COMMENT ON COLUMN scheduling.schedule_export_templates.is_default IS 
+'Indicates if this is the default template for the target system';
+
+-- =============================================================================
+-- 3. TABLE: scheduling.workload_distribution
+-- =============================================================================
+-- Serial No: 44 | TABLE: scheduling.workload_distribution
+-- Description: Analyzes and optimizes workload distribution across employees and teams
+-- Business Case: Ensures fair and balanced workload distribution to prevent burnout,
+--                optimize productivity, and maintain employee satisfaction. Supports
+--                workload analysis, balancing algorithms, and distribution optimization.
+--                Enables data-driven decisions about workload allocation and team balancing.
+-- KPI: 1. Workload balance score (>0.8), 2. Workload optimization rate (>15%),
+--      3. Employee satisfaction with workload (>4/5), 4. Burnout reduction rate (>20%),
+--      5. Productivity improvement from balanced workload (>10%), 6. Workload analysis accuracy (>95%),
+--      7. Manager workload visibility improvement (>50%)
+-- Feature Reference: F-WLD-001, F-WLD-002, F-WLD-003, F-WLD-004, F-WLD-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.workload_distribution CASCADE;
+
+CREATE TABLE scheduling.workload_distribution (
+    -- Primary identifiers
+    distribution_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    distribution_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (distribution_code ~ '^WLD-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Distribution context (aligned with schema)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    analysis_period_start DATE NOT NULL,
+    analysis_period_end DATE NOT NULL,
+    
+    -- Workload metrics
+    total_workload_hours NUMERIC(10,2) NOT NULL CHECK (total_workload_hours >= 0),
+    average_workload_per_employee NUMERIC(10,2) NOT NULL CHECK (average_workload_per_employee >= 0),
+    workload_standard_deviation NUMERIC(10,2) CHECK (workload_standard_deviation >= 0),
+    
+    -- Employee distribution
+    employee_count INTEGER NOT NULL CHECK (employee_count >= 0),
+    underloaded_employees INTEGER CHECK (underloaded_employees >= 0),
+    optimally_loaded_employees INTEGER CHECK (optimally_loaded_employees >= 0),
+    overloaded_employees INTEGER CHECK (overloaded_employees >= 0),
+    
+    -- Balance metrics
+    gini_coefficient NUMERIC(10,4) CHECK (gini_coefficient BETWEEN 0 AND 1),
+    workload_balance_score NUMERIC(5,2) CHECK (workload_balance_score BETWEEN 0 AND 100),
+    fairness_index NUMERIC(5,2) CHECK (fairness_index BETWEEN 0 AND 100),
+    
+    -- Detailed analysis
+    workload_distribution_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    employee_workload_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    team_workload_analysis JSONB DEFAULT '{}'::jsonb,
+    
+    -- Risk assessment
+    burnout_risk_employees INTEGER CHECK (burnout_risk_employees >= 0),
+    burnout_risk_score NUMERIC(5,2) CHECK (burnout_risk_score BETWEEN 0 AND 100),
+    workload_risk_assessment JSONB DEFAULT '{}'::jsonb,
+    
+    -- Optimization recommendations
+    optimization_opportunities JSONB DEFAULT '[]'::jsonb,
+    recommended_adjustments JSONB DEFAULT '{}'::jsonb,
+    estimated_improvement NUMERIC(5,2) CHECK (estimated_improvement BETWEEN 0 AND 100),
+    
+    -- Status and action
+    status scheduling.workload_status_enum NOT NULL DEFAULT 'ANALYZED',
+    actions_taken TEXT[] DEFAULT '{}',
+    improvement_achieved NUMERIC(5,2) CHECK (improvement_achieved BETWEEN 0 AND 100),
+    
+    -- Comparison metrics
+    previous_period_balance_score NUMERIC(5,2) 
+        CHECK (previous_period_balance_score BETWEEN 0 AND 100),
+    balance_improvement NUMERIC(5,2) GENERATED ALWAYS AS (
+        workload_balance_score - COALESCE(previous_period_balance_score, 0)
+    ) STORED,
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_by UUID REFERENCES hr.employees(employee_id),
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_workload_period 
+        CHECK (analysis_period_end >= analysis_period_start),
+    CONSTRAINT chk_employee_counts 
+        CHECK (
+            employee_count = COALESCE(underloaded_employees, 0) +
+                            COALESCE(optimally_loaded_employees, 0) +
+                            COALESCE(overloaded_employees, 0)
+        ),
+    CONSTRAINT chk_balance_improvement 
+        CHECK (
+            (previous_period_balance_score IS NULL AND balance_improvement IS NULL) OR
+            (previous_period_balance_score IS NOT NULL)
+        ),
+    CONSTRAINT chk_workload_dates 
+        CHECK (reviewed_at IS NULL OR reviewed_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_schedule
+    ON scheduling.workload_distribution(schedule_id, analysis_period_end DESC);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_balance
+    ON scheduling.workload_distribution(workload_balance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_period
+    ON scheduling.workload_distribution(analysis_period_start, analysis_period_end);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_risk
+    ON scheduling.workload_distribution(burnout_risk_score DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_improvement
+    ON scheduling.workload_distribution(balance_improvement DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_department
+    ON scheduling.workload_distribution(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_location
+    ON scheduling.workload_distribution(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_status
+    ON scheduling.workload_distribution(status, analysis_period_end DESC);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_details
+    ON scheduling.workload_distribution USING GIN(employee_workload_details);
+CREATE INDEX IF NOT EXISTS idx_workload_distribution_metadata
+    ON scheduling.workload_distribution USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_workload_distribution_updated_at 
+    ON scheduling.workload_distribution;
+CREATE TRIGGER trg_workload_distribution_updated_at
+    BEFORE UPDATE ON scheduling.workload_distribution
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.workload_distribution IS 
+'Analyzes and optimizes workload distribution across employees and teams.
+Ensures fair and balanced workload distribution to prevent burnout, optimize productivity,
+and maintain employee satisfaction. Supports workload analysis, balancing algorithms,
+and distribution optimization. Enables data-driven decisions about workload allocation
+and team balancing. Aligned with workforce analytics and compliance standards.';
+
+COMMENT ON COLUMN scheduling.workload_distribution.distribution_id IS 
+'Unique identifier for workload distribution analysis (UUID)';
+COMMENT ON COLUMN scheduling.workload_distribution.distribution_code IS 
+'Business-readable distribution code (format: WLD-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.workload_distribution.schedule_id IS 
+'Reference to the schedule being analyzed';
+COMMENT ON COLUMN scheduling.workload_distribution.gini_coefficient IS 
+'Gini coefficient measuring workload inequality (0=perfect equality, 1=perfect inequality)';
+COMMENT ON COLUMN scheduling.workload_distribution.workload_balance_score IS 
+'Overall workload balance score (0-100, higher=better balance)';
+COMMENT ON COLUMN scheduling.workload_distribution.fairness_index IS 
+'Fairness index measuring equitable distribution (0-100)';
+COMMENT ON COLUMN scheduling.workload_distribution.burnout_risk_score IS 
+'Risk score for employee burnout (0-100, higher=higher risk)';
+COMMENT ON COLUMN scheduling.workload_distribution.balance_improvement IS 
+'Improvement in balance score from previous period (calculated)';
+
+-- =============================================================================
+-- 4. TABLE: scheduling.schedule_approval_workflow
+-- =============================================================================
+-- Serial No: 45 | TABLE: scheduling.schedule_approval_workflow
+-- Description: Defines and manages multi-step approval workflows for schedules
+-- Business Case: Enables complex, configurable approval workflows for schedule publication,
+--                changes, and exceptions. Supports multi-level approvals, delegation,
+--                escalation, and conditional routing. Ensures proper authorization and
+--                compliance with organizational policies.
+-- KPI: 1. Workflow completion rate (>95%), 2. Average approval time (<24 hours),
+--      3. Escalation rate (<5%), 4. Workflow configuration accuracy (>98%),
+--      5. Delegation effectiveness (>90%), 6. Approval audit trail completeness (>100%),
+--      7. User satisfaction with workflow (>4/5)
+-- Feature Reference: F-WFL-001, F-WFL-002, F-WFL-003, F-WFL-004, F-WFL-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.schedule_approval_workflow CASCADE;
+
+CREATE TABLE scheduling.schedule_approval_workflow (
+    -- Primary identifiers
+    workflow_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (workflow_code ~ '^WFL-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Workflow definition
+    workflow_name VARCHAR(200) NOT NULL,
+    description TEXT,
+    workflow_type VARCHAR(50) NOT NULL
+        CHECK (workflow_type IN ('SCHEDULE_PUBLICATION', 'SCHEDULE_CHANGE', 'TIME_OFF',
+                                'SHIFT_SWAP', 'OVERTIME', 'EXCEPTION', 'COMPLIANCE_OVERRIDE')),
+    
+    -- Workflow configuration
+    steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+    conditions JSONB DEFAULT '{}'::jsonb,
+    routing_rules JSONB DEFAULT '{}'::jsonb,
+    approval_matrix JSONB DEFAULT '{}'::jsonb,
+    
+    -- Participants and roles (aligned with security schema)
+    approver_roles TEXT[] NOT NULL DEFAULT '{}',
+    backup_approvers JSONB DEFAULT '{}'::jsonb,
+    escalation_path JSONB DEFAULT '{}'::jsonb,
+    
+    -- Timing and deadlines
+    default_sla INTERVAL DEFAULT '48 hours',
+    step_timeouts JSONB DEFAULT '{}'::jsonb,
+    reminder_settings JSONB DEFAULT '{}'::jsonb,
+    
+    -- Status and lifecycle
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    effective_start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    effective_end_date DATE,
+    
+    -- Usage and performance
+    usage_count INTEGER NOT NULL DEFAULT 0 CHECK (usage_count >= 0),
+    average_completion_time INTERVAL,
+    success_rate NUMERIC(5,2) CHECK (success_rate BETWEEN 0 AND 100),
+    escalation_rate NUMERIC(5,2) CHECK (escalation_rate BETWEEN 0 AND 100),
+    
+    -- Compliance and control
+    compliance_requirements JSONB DEFAULT '{}'::jsonb,
+    audit_requirements JSONB DEFAULT '{}'::jsonb,
+    control_points JSONB DEFAULT '{}'::jsonb,
+    
+    -- Notifications and alerts (aligned with communication schema)
+    notification_templates JSONB DEFAULT '{}'::jsonb,
+    alert_triggers JSONB DEFAULT '{}'::jsonb,
+    
+    -- Integration (aligned with integration schema)
+    integration_hooks JSONB DEFAULT '{}'::jsonb,
+    system_triggers JSONB DEFAULT '{}'::jsonb,
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_workflow_dates 
+        CHECK (
+            effective_end_date IS NULL OR effective_end_date >= effective_start_date
+        ),
+    CONSTRAINT chk_workflow_approval 
+        CHECK (
+            (approved_by IS NOT NULL AND approved_at IS NOT NULL) OR
+            (approved_by IS NULL AND approved_at IS NULL)
+        ),
+    CONSTRAINT chk_workflow_steps 
+        CHECK (jsonb_array_length(steps) > 0),
+    CONSTRAINT chk_workflow_effective_dates 
+        CHECK (approved_at IS NULL OR approved_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_type
+    ON scheduling.schedule_approval_workflow(workflow_type, is_active);
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_active
+    ON scheduling.schedule_approval_workflow(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_dates
+    ON scheduling.schedule_approval_workflow(effective_start_date, effective_end_date NULLS FIRST);
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_usage
+    ON scheduling.schedule_approval_workflow(usage_count DESC);
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_steps
+    ON scheduling.schedule_approval_workflow USING GIN(steps);
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_department
+    ON scheduling.schedule_approval_workflow(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_location
+    ON scheduling.schedule_approval_workflow(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_approval_workflow_metadata
+    ON scheduling.schedule_approval_workflow USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_schedule_approval_workflow_updated_at 
+    ON scheduling.schedule_approval_workflow;
+CREATE TRIGGER trg_schedule_approval_workflow_updated_at
+    BEFORE UPDATE ON scheduling.schedule_approval_workflow
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.schedule_approval_workflow IS 
+'Defines and manages configurable multi-step approval workflows for schedules.
+Enables complex, configurable approval workflows for schedule publication, changes,
+and exceptions. Supports multi-level approvals, delegation, escalation, and conditional
+routing. Ensures proper authorization and compliance with organizational policies.
+Aligned with enterprise workflow and compliance standards.';
+
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.workflow_id IS 
+'Unique identifier for the approval workflow (UUID)';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.workflow_code IS 
+'Business-readable workflow code (format: WFL-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.workflow_type IS 
+'Type of workflow (SCHEDULE_PUBLICATION, SCHEDULE_CHANGE, TIME_OFF, etc.)';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.steps IS 
+'JSONB array defining approval workflow steps';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.approval_matrix IS 
+'JSONB defining approval authority matrix';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.default_sla IS 
+'Default service level agreement for approval completion';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.success_rate IS 
+'Percentage of workflows completed successfully (0-100)';
+COMMENT ON COLUMN scheduling.schedule_approval_workflow.escalation_rate IS 
+'Percentage of workflows requiring escalation (0-100)';
+
+-- =============================================================================
+-- VERIFICATION QUERIES
+-- =============================================================================
+-- Verify ENUM types exist
+SELECT 
+    typname AS enum_name,
+    pg_catalog.array_agg(enumlabel ORDER BY enumsortorder) AS enum_values
+FROM pg_type
+JOIN pg_enum ON pg_enum.enumtypid = pg_type.oid
+JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace
+WHERE typname IN ('export_format_enum', 'export_target_system_enum')
+    AND nspname = 'scheduling'
+GROUP BY typname;
+
+-- Verify table exists
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name = 'schedule_export_templates' 
+    AND table_schema = 'scheduling';
+
+-- Verify unique default constraint works
+SELECT indexname, indexdef 
+FROM pg_indexes 
+WHERE schemaname = 'scheduling' 
+    AND tablename = 'schedule_export_templates'
+    AND indexname LIKE '%unique_default%';
+
+-- Verify all constraints
+SELECT 
+    conname AS constraint_name,
+    contype AS constraint_type,
+    pg_get_constraintdef(oid) AS constraint_definition
+FROM pg_constraint
+WHERE conrelid = 'scheduling.schedule_export_templates'::regclass
+ORDER BY conname;
+
+
+-- =============================================================================
+-- TABLE: compliance.compliance_rule_sets
+-- =============================================================================
+-- Description: Master table for compliance rule set definitions
+-- Business Case: Groups related compliance rules for organized evaluation and 
+--                management. Supports rule versioning, activation/deactivation,
+--                and jurisdiction-specific rule collections.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS compliance.compliance_rule_sets (
+    -- Primary identifiers
+    rule_set_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    rule_set_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (rule_set_code ~ '^CRS-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Core information
+    name VARCHAR(200) NOT NULL,
+    description TEXT,
+    
+    -- Rule set characteristics
+    rule_set_type VARCHAR(50) NOT NULL 
+        CHECK (rule_set_type IN ('LABOR_LAW', 'UNION_AGREEMENT', 'COMPANY_POLICY', 
+                                'INDUSTRY_STANDARD', 'CUSTOM', 'COMPOSITE')),
+    jurisdiction VARCHAR(100),
+    country_code VARCHAR(10),
+    region VARCHAR(50),
+    
+    -- Rule collection
+    rule_ids UUID[] DEFAULT '{}',
+    total_rules INTEGER NOT NULL DEFAULT 0 CHECK (total_rules >= 0),
+    active_rules INTEGER NOT NULL DEFAULT 0 CHECK (active_rules >= 0),
+    
+    -- Applicability
+    applicable_departments UUID[] DEFAULT '{}',
+    applicable_locations UUID[] DEFAULT '{}',
+    applicable_positions UUID[] DEFAULT '{}',
+    applicable_employee_types TEXT[] DEFAULT '{}',
+    
+    -- Status and lifecycle
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_system_rule_set BOOLEAN NOT NULL DEFAULT FALSE,
+    effective_start_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    effective_end_date DATE,
+    
+    -- Versioning
+    version_number VARCHAR(20) NOT NULL DEFAULT '1.0',
+    parent_rule_set_id UUID REFERENCES compliance.compliance_rule_sets(rule_set_id),
+    
+    -- Approval workflow
+    approval_status VARCHAR(20) NOT NULL DEFAULT 'DRAFT'
+        CHECK (approval_status IN ('DRAFT', 'REVIEW', 'APPROVED', 'REJECTED', 'RETIRED')),
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    approval_notes TEXT,
+    
+    -- Performance tracking
+    execution_count INTEGER NOT NULL DEFAULT 0 CHECK (execution_count >= 0),
+    last_executed_at TIMESTAMP WITH TIME ZONE,
+    average_execution_time_ms INTEGER,
+    violation_detection_rate NUMERIC(5,2) CHECK (violation_detection_rate BETWEEN 0 AND 100),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_rule_set_dates 
+        CHECK (effective_end_date IS NULL OR effective_end_date >= effective_start_date),
+    CONSTRAINT chk_rule_counts 
+        CHECK (active_rules <= total_rules),
+    CONSTRAINT chk_approval_logic 
+        CHECK (
+            (approval_status = 'APPROVED' AND approved_at IS NOT NULL AND approved_by IS NOT NULL) OR
+            (approval_status != 'APPROVED')
+        )
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_rule_sets_code 
+    ON compliance.compliance_rule_sets(rule_set_code);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_type 
+    ON compliance.compliance_rule_sets(rule_set_type);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_jurisdiction 
+    ON compliance.compliance_rule_sets(jurisdiction);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_active 
+    ON compliance.compliance_rule_sets(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_rule_sets_status 
+    ON compliance.compliance_rule_sets(approval_status);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_dates 
+    ON compliance.compliance_rule_sets(effective_start_date, effective_end_date);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_parent 
+    ON compliance.compliance_rule_sets(parent_rule_set_id) 
+    WHERE parent_rule_set_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rule_sets_applicable_departments 
+    ON compliance.compliance_rule_sets USING GIN(applicable_departments);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_applicable_locations 
+    ON compliance.compliance_rule_sets USING GIN(applicable_locations);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_rules 
+    ON compliance.compliance_rule_sets USING GIN(rule_ids);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_metadata 
+    ON compliance.compliance_rule_sets USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_tags 
+    ON compliance.compliance_rule_sets USING GIN(tags);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_rule_sets_updated_at 
+    ON compliance.compliance_rule_sets;
+CREATE TRIGGER trg_rule_sets_updated_at
+    BEFORE UPDATE ON compliance.compliance_rule_sets
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE compliance.compliance_rule_sets IS 
+'Master table for compliance rule set definitions. Groups related compliance rules 
+for organized evaluation and management. Supports rule versioning, activation/deactivation, 
+and jurisdiction-specific rule collections. Aligned with enterprise compliance standards.';
+
+COMMENT ON COLUMN compliance.compliance_rule_sets.rule_set_id IS 
+'Unique identifier for rule set (UUID)';
+COMMENT ON COLUMN compliance.compliance_rule_sets.rule_set_code IS 
+'Business-readable rule set code (format: CRS-XXX-XXXXXX)';
+COMMENT ON COLUMN compliance.compliance_rule_sets.rule_ids IS 
+'Array of rule IDs included in this rule set';
+COMMENT ON COLUMN compliance.compliance_rule_sets.violation_detection_rate IS 
+'Percentage of executions that detected violations (0-100)';
+
+-- =============================================================================
+-- TABLE: scheduling.compliance_rule_engine
+-- =============================================================================
+-- Serial No: 46 | TABLE: scheduling.compliance_rule_engine
+-- Description: Executes and tracks compliance rule evaluations for schedules
+-- Business Case: Provides a rule engine for evaluating schedules against compliance rules,
+--                regulations, and business policies. Supports complex rule evaluation,
+--                real-time compliance checking, and violation tracking. Enables proactive
+--                compliance management and regulatory adherence.
+-- KPI: 1. Rule evaluation accuracy (>99.9%), 2. Evaluation performance (<5 seconds),
+--      3. Violation detection rate (>95%), 4. False positive rate (<2%),
+--      5. Rule coverage completeness (>98%), 6. Engine availability (>99.9%),
+--      7. Compliance improvement rate (>15%)
+-- Feature Reference: F-CRE-001, F-CRE-002, F-CRE-003, F-CRE-004, F-CRE-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.compliance_rule_engine CASCADE;
+
+CREATE TABLE scheduling.compliance_rule_engine (
+    -- Primary identifiers
+    execution_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    execution_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (execution_code ~ '^CRE-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Execution context (aligned with schema)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    rule_set_id UUID REFERENCES compliance.compliance_rule_sets(rule_set_id),
+    
+    -- Execution details
+    execution_type VARCHAR(50) NOT NULL
+        CHECK (execution_type IN ('SCHEDULE_VALIDATION', 'REAL_TIME_CHECK', 'BATCH_VALIDATION',
+                                 'PRE_PUBLICATION', 'POST_CHANGE', 'AUDIT')),
+    execution_mode VARCHAR(20) NOT NULL DEFAULT 'AUTOMATIC'
+        CHECK (execution_mode IN ('AUTOMATIC', 'MANUAL', 'SCHEDULED', 'ON_DEMAND')),
+    
+    -- Timing
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    execution_duration INTERVAL GENERATED ALWAYS AS (
+        completed_at - started_at
+    ) STORED,
+    
+    -- Performance metrics
+    rules_evaluated INTEGER NOT NULL DEFAULT 0 CHECK (rules_evaluated >= 0),
+    rules_passed INTEGER NOT NULL DEFAULT 0 CHECK (rules_passed >= 0),
+    rules_failed INTEGER NOT NULL DEFAULT 0 CHECK (rules_failed >= 0),
+    rules_skipped INTEGER NOT NULL DEFAULT 0 CHECK (rules_skipped >= 0),
+    pass_rate NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN rules_evaluated > 0 THEN (rules_passed::NUMERIC / rules_evaluated * 100)
+            ELSE 0
+        END
+    ) STORED,
+    
+    -- Results
+    violations_detected JSONB DEFAULT '[]'::jsonb,
+    warnings_generated JSONB DEFAULT '[]'::jsonb,
+    recommendations JSONB DEFAULT '[]'::jsonb,
+    execution_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    
+    -- Resource usage
+    memory_used_mb INTEGER CHECK (memory_used_mb >= 0),
+    cpu_time_seconds NUMERIC(10,2) CHECK (cpu_time_seconds >= 0),
+    database_queries INTEGER CHECK (database_queries >= 0),
+    
+    -- Status and outcome
+    status VARCHAR(20) NOT NULL DEFAULT 'RUNNING'
+        CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELED', 'TIMEOUT')),
+    outcome VARCHAR(20) 
+        CHECK (outcome IN ('COMPLIANT', 'NON_COMPLIANT', 'WITH_WARNINGS', 'ERROR')),
+    
+    -- Error handling
+    error_message TEXT,
+    error_details JSONB DEFAULT '{}'::jsonb,
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_execution_timing 
+        CHECK (completed_at IS NULL OR completed_at >= started_at),
+    CONSTRAINT chk_rule_counts 
+        CHECK (rules_passed + rules_failed + rules_skipped = rules_evaluated),
+    CONSTRAINT chk_completion_status 
+        CHECK (
+            (status = 'COMPLETED' AND completed_at IS NOT NULL) OR
+            (status != 'COMPLETED' AND completed_at IS NULL)
+        ),
+    CONSTRAINT chk_execution_dates 
+        CHECK (updated_at IS NULL OR updated_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_schedule
+    ON scheduling.compliance_rule_engine(schedule_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_type
+    ON scheduling.compliance_rule_engine(execution_type, status);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_outcome
+    ON scheduling.compliance_rule_engine(outcome, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_performance
+    ON scheduling.compliance_rule_engine(execution_duration DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_pass_rate
+    ON scheduling.compliance_rule_engine(pass_rate DESC);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_department
+    ON scheduling.compliance_rule_engine(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_location
+    ON scheduling.compliance_rule_engine(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_summary
+    ON scheduling.compliance_rule_engine USING GIN(execution_summary);
+CREATE INDEX IF NOT EXISTS idx_compliance_engine_metadata
+    ON scheduling.compliance_rule_engine USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_compliance_rule_engine_updated_at 
+    ON scheduling.compliance_rule_engine;
+CREATE TRIGGER trg_compliance_rule_engine_updated_at
+    BEFORE UPDATE ON scheduling.compliance_rule_engine
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.compliance_rule_engine IS 
+'Executes and tracks compliance rule evaluations for schedules.
+Provides a rule engine for evaluating schedules against compliance rules, regulations,
+and business policies. Supports complex rule evaluation, real-time compliance checking,
+and violation tracking. Enables proactive compliance management and regulatory adherence.
+Aligned with enterprise compliance and audit standards.';
+
+COMMENT ON COLUMN scheduling.compliance_rule_engine.execution_id IS 
+'Unique identifier for rule engine execution (UUID)';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.execution_code IS 
+'Business-readable execution code (format: CRE-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.schedule_id IS 
+'Reference to the schedule being evaluated';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.execution_type IS 
+'Type of compliance execution (SCHEDULE_VALIDATION, REAL_TIME_CHECK, etc.)';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.execution_duration IS 
+'Total execution time (calculated from started_at and completed_at)';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.pass_rate IS 
+'Percentage of rules that passed evaluation (0-100, calculated)';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.violations_detected IS 
+'JSONB array of detected compliance violations';
+COMMENT ON COLUMN scheduling.compliance_rule_engine.outcome IS 
+'Overall compliance outcome (COMPLIANT, NON_COMPLIANT, WITH_WARNINGS, ERROR)';
+
+-- Verify both tables exist
+SELECT table_name, table_schema 
+FROM information_schema.tables 
+WHERE table_name IN ('compliance_rule_sets', 'compliance_rule_engine')
+ORDER BY table_schema, table_name;
+
+-- Verify foreign key relationship
+SELECT
+    tc.table_name,
+    kcu.column_name,
+    ccu.table_name AS foreign_table_name,
+    ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+    ON tc.constraint_name = kcu.constraint_name
+JOIN information_schema.constraint_column_usage AS ccu
+    ON ccu.constraint_name = tc.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY'
+AND tc.table_name = 'compliance_rule_engine';
+
+-- Verify indexes
+SELECT tablename, indexname, indexdef 
+FROM pg_indexes 
+WHERE tablename IN ('compliance_rule_sets', 'compliance_rule_engine')
+ORDER BY tablename, indexname;
+
+-- Verify triggers
+SELECT trigger_name, event_object_table, action_timing 
+FROM information_schema.triggers 
+WHERE event_object_table IN ('compliance_rule_sets', 'compliance_rule_engine');
+
+
+-- =============================================================================
+-- 6. TABLE: scheduling.employee_schedule_preferences_matching
+-- =============================================================================
+-- Serial No: 47 | TABLE: scheduling.employee_schedule_preferences_matching
+-- Description: Matches employee preferences with schedule assignments for optimization
+-- Business Case: Optimizes schedule assignments by matching employee preferences for
+--                shift times, locations, teams, and work patterns. Supports preference
+--                weighting, matching algorithms, and satisfaction optimization. Improves
+--                employee engagement and retention through personalized scheduling.
+-- KPI: 1. Preference matching rate (>80%), 2. Matching algorithm accuracy (>90%),
+--      3. Employee satisfaction improvement (>15%), 4. Matching processing time (<1 minute),
+--      5. Weighted preference fulfillment (>75%), 6. Algorithm fairness score (>0.8),
+--      7. Manager satisfaction with matching results (>4/5)
+-- Feature Reference: F-MAT-001, F-MAT-002, F-MAT-003, F-MAT-004, F-MAT-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.employee_schedule_preferences_matching CASCADE;
+
+CREATE TABLE scheduling.employee_schedule_preferences_matching (
+    -- Primary identifiers
+    matching_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    matching_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (matching_code ~ '^MAT-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Matching context (aligned with schema)
+    schedule_id UUID NOT NULL REFERENCES scheduling.schedules(schedule_id) ON DELETE CASCADE,
+    matching_round INTEGER NOT NULL DEFAULT 1 CHECK (matching_round >= 1),
+    
+    -- Algorithm configuration
+    algorithm_type VARCHAR(50) NOT NULL
+        CHECK (algorithm_type IN ('WEIGHTED_SCORING', 'CONSTRAINT_SATISFACTION', 'OPTIMIZATION',
+                                 'HEURISTIC', 'MACHINE_LEARNING', 'HYBRID')),
+    algorithm_parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    preference_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
+    constraints JSONB DEFAULT '{}'::jsonb,
+    
+    -- Matching results
+    matches_made INTEGER NOT NULL DEFAULT 0 CHECK (matches_made >= 0),
+    matches_possible INTEGER NOT NULL DEFAULT 0 CHECK (matches_possible >= 0),
+    match_rate NUMERIC(5,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN matches_possible > 0 THEN (matches_made::NUMERIC / matches_possible * 100)
+            ELSE 0
+        END
+    ) STORED,
+    average_preference_score NUMERIC(5,2) 
+        CHECK (average_preference_score BETWEEN 0 AND 100),
+    weighted_satisfaction_score NUMERIC(5,2) 
+        CHECK (weighted_satisfaction_score BETWEEN 0 AND 100),
+    
+    -- Detailed results
+    matching_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    employee_matching_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
+    unmatched_preferences JSONB DEFAULT '{}'::jsonb,
+    
+    -- Performance metrics
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    processing_time INTERVAL GENERATED ALWAYS AS (
+        completed_at - started_at
+    ) STORED,
+    iterations INTEGER CHECK (iterations >= 0),
+    convergence_achieved BOOLEAN NOT NULL DEFAULT FALSE,
+    
+    -- Quality metrics
+    solution_quality NUMERIC(5,2) CHECK (solution_quality BETWEEN 0 AND 100),
+    optimality_gap NUMERIC(5,2) CHECK (optimality_gap BETWEEN 0 AND 100),
+    fairness_score NUMERIC(5,2) CHECK (fairness_score BETWEEN 0 AND 100),
+    
+    -- Status and outcome
+    status VARCHAR(20) NOT NULL DEFAULT 'RUNNING'
+        CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELED', 'OPTIMAL', 'SUBOPTIMAL')),
+    outcome VARCHAR(20) 
+        CHECK (outcome IN ('SUCCESS', 'PARTIAL_SUCCESS', 'FAILED', 'TIMEOUT')),
+    
+    -- Implementation tracking
+    implemented BOOLEAN NOT NULL DEFAULT FALSE,
+    implementation_notes TEXT,
+    employee_feedback_score NUMERIC(5,2) 
+        CHECK (employee_feedback_score BETWEEN 0 AND 100),
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_matching_timing 
+        CHECK (completed_at IS NULL OR completed_at >= started_at),
+    CONSTRAINT chk_match_counts 
+        CHECK (matches_made <= matches_possible),
+    CONSTRAINT chk_completion_status 
+        CHECK (
+            (status IN ('COMPLETED', 'OPTIMAL', 'SUBOPTIMAL') AND completed_at IS NOT NULL) OR
+            (status IN ('RUNNING', 'FAILED', 'CANCELED') AND completed_at IS NULL)
+        ),
+    CONSTRAINT chk_matching_dates 
+        CHECK (updated_at IS NULL OR updated_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_preference_matching_schedule
+    ON scheduling.employee_schedule_preferences_matching(schedule_id, matching_round DESC);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_algorithm
+    ON scheduling.employee_schedule_preferences_matching(algorithm_type, status);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_rate
+    ON scheduling.employee_schedule_preferences_matching(match_rate DESC);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_quality
+    ON scheduling.employee_schedule_preferences_matching(solution_quality DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_time
+    ON scheduling.employee_schedule_preferences_matching(processing_time DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_department
+    ON scheduling.employee_schedule_preferences_matching(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_preference_matching_location
+    ON scheduling.employee_schedule_preferences_matching(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_preference_matching_details
+    ON scheduling.employee_schedule_preferences_matching USING GIN(matching_details);
+CREATE INDEX IF NOT EXISTS idx_preference_matching_metadata
+    ON scheduling.employee_schedule_preferences_matching USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_employee_schedule_preferences_matching_updated_at 
+    ON scheduling.employee_schedule_preferences_matching;
+CREATE TRIGGER trg_employee_schedule_preferences_matching_updated_at
+    BEFORE UPDATE ON scheduling.employee_schedule_preferences_matching
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.employee_schedule_preferences_matching IS 
+'Matches employee preferences with schedule assignments using optimization algorithms.
+Optimizes schedule assignments by matching employee preferences for shift times, locations,
+teams, and work patterns. Supports preference weighting, matching algorithms, and satisfaction
+optimization. Improves employee engagement and retention through personalized scheduling.
+Aligned with workforce optimization and employee satisfaction standards.';
+
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.matching_id IS 
+'Unique identifier for preference matching run (UUID)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.matching_code IS 
+'Business-readable matching code (format: MAT-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.algorithm_type IS 
+'Type of matching algorithm used (WEIGHTED_SCORING, MACHINE_LEARNING, etc.)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.match_rate IS 
+'Percentage of preferences successfully matched (0-100, calculated)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.processing_time IS 
+'Total time to complete matching (calculated from started_at and completed_at)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.fairness_score IS 
+'Algorithm fairness score measuring equitable treatment (0-100)';
+COMMENT ON COLUMN scheduling.employee_schedule_preferences_matching.employee_feedback_score IS 
+'Employee satisfaction score with matching results (0-100)';
+-- =============================================================================
+-- 7. TABLE: scheduling.schedule_benchmarking
+-- =============================================================================
+-- Serial No: 48 | TABLE: scheduling.schedule_benchmarking
+-- Description: Benchmarks schedule performance against industry standards and best practices
+-- Business Case: Enables comparison of schedule performance against industry benchmarks,
+--                competitors, and internal targets. Supports continuous improvement by
+--                identifying performance gaps and improvement opportunities. Provides
+--                competitive intelligence and strategic insights.
+-- KPI: 1. Benchmark data completeness (>90%), 2. Benchmark comparison accuracy (>95%),
+--      3. Improvement target achievement (>80%), 4. Benchmark update frequency (>quarterly),
+--      5. Industry alignment improvement (>15%), 6. Competitive advantage measurement (>85%),
+--      7. Stakeholder satisfaction with benchmarking (>4/5)
+-- Feature Reference: F-BCH-001, F-BCH-002, F-BCH-003, F-BCH-004, F-BCH-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.schedule_benchmarking CASCADE;
+
+CREATE TABLE scheduling.schedule_benchmarking (
+    -- Primary identifiers
+    benchmark_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    benchmark_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (benchmark_code ~ '^BCH-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Benchmark context (aligned with schema)
+    schedule_id UUID REFERENCES scheduling.schedules(schedule_id),
+    benchmark_period_start DATE NOT NULL,
+    benchmark_period_end DATE NOT NULL,
+    
+    -- Benchmark source
+    benchmark_source VARCHAR(50) NOT NULL
+        CHECK (benchmark_source IN ('INDUSTRY_STANDARD', 'COMPETITOR', 'INTERNAL_HISTORY',
+                                   'BEST_PRACTICE', 'REGULATORY', 'ACADEMIC', 'CONSULTANT')),
+    source_name VARCHAR(200) NOT NULL,
+    source_version VARCHAR(50),
+    data_collection_method VARCHAR(100),
+    
+    -- Benchmark metrics
+    metric_category VARCHAR(50) NOT NULL
+        CHECK (metric_category IN ('COVERAGE', 'COST', 'COMPLIANCE', 'PRODUCTIVITY',
+                                  'QUALITY', 'SATISFACTION', 'EFFICIENCY', 'RELIABILITY')),
+    metric_name VARCHAR(100) NOT NULL,
+    metric_unit VARCHAR(50) NOT NULL,
+    
+    -- Values
+    benchmark_value NUMERIC(15,4) NOT NULL,
+    actual_value NUMERIC(15,4) NOT NULL,
+    variance NUMERIC(15,4) GENERATED ALWAYS AS (
+        actual_value - benchmark_value
+    ) STORED,
+    variance_percentage NUMERIC(10,2) GENERATED ALWAYS AS (
+        CASE
+            WHEN benchmark_value != 0 THEN ((actual_value - benchmark_value) / benchmark_value * 100)
+            ELSE NULL
+        END
+    ) STORED,
+    
+    -- Comparison analysis (FIXED: Regular column, populated by trigger)
+    performance_gap VARCHAR(20) NOT NULL DEFAULT 'ON_PAR'
+        CHECK (performance_gap IN ('SIGNIFICANTLY_BELOW', 'SLIGHTLY_BELOW', 
+                                  'ON_PAR', 'SLIGHTLY_ABOVE', 'SIGNIFICANTLY_ABOVE')),
+    gap_severity VARCHAR(20) 
+        CHECK (gap_severity IN ('MINOR', 'MODERATE', 'MAJOR', 'CRITICAL')),
+    
+    -- Confidence and reliability
+    confidence_level NUMERIC(5,2) CHECK (confidence_level BETWEEN 0 AND 100),
+    data_reliability VARCHAR(20) 
+        CHECK (data_reliability IN ('LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH')),
+    sample_size INTEGER CHECK (sample_size >= 0),
+    
+    -- Insights and recommendations
+    insights TEXT,
+    improvement_opportunities TEXT[] DEFAULT '{}',
+    recommended_actions TEXT[] DEFAULT '{}',
+    estimated_impact NUMERIC(10,2) CHECK (estimated_impact >= 0),
+    
+    -- Status and tracking
+    status VARCHAR(20) NOT NULL DEFAULT 'ANALYZED'
+        CHECK (status IN ('ANALYZED', 'REVIEWED', 'ACTION_PLANNED', 'IN_PROGRESS', 'ACHIEVED', 'ARCHIVED')),
+    improvement_target NUMERIC(15,4),
+    target_achievement_date DATE,
+    
+    -- Validation
+    validated_by UUID REFERENCES hr.employees(employee_id),
+    validated_at TIMESTAMP WITH TIME ZONE,
+    validation_notes TEXT,
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_benchmark_period 
+        CHECK (benchmark_period_end >= benchmark_period_start),
+    CONSTRAINT chk_benchmark_values 
+        CHECK (benchmark_value IS NOT NULL AND actual_value IS NOT NULL),
+    CONSTRAINT chk_validation_status 
+        CHECK (
+            (validated_by IS NOT NULL AND validated_at IS NOT NULL) OR
+            (validated_by IS NULL AND validated_at IS NULL)
+        ),
+    CONSTRAINT chk_benchmark_dates 
+        CHECK (validated_at IS NULL OR validated_at >= created_at)
+);
+
+-- =============================================================================
+-- TRIGGER FUNCTION: Calculate performance_gap automatically
+-- =============================================================================
+CREATE OR REPLACE FUNCTION scheduling.calculate_performance_gap()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Calculate performance_gap based on variance_percentage
+    IF NEW.variance_percentage IS NULL THEN
+        NEW.performance_gap := 'ON_PAR';
+    ELSIF NEW.variance_percentage < -10 THEN
+        NEW.performance_gap := 'SIGNIFICANTLY_BELOW';
+    ELSIF NEW.variance_percentage BETWEEN -10 AND -2 THEN
+        NEW.performance_gap := 'SLIGHTLY_BELOW';
+    ELSIF NEW.variance_percentage BETWEEN -2 AND 2 THEN
+        NEW.performance_gap := 'ON_PAR';
+    ELSIF NEW.variance_percentage BETWEEN 2 AND 10 THEN
+        NEW.performance_gap := 'SLIGHTLY_ABOVE';
+    ELSE
+        NEW.performance_gap := 'SIGNIFICANTLY_ABOVE';
+    END IF;
+    
+    -- Calculate gap_severity based on absolute variance_percentage
+    IF NEW.variance_percentage IS NULL THEN
+        NEW.gap_severity := NULL;
+    ELSIF ABS(NEW.variance_percentage) < 5 THEN
+        NEW.gap_severity := 'MINOR';
+    ELSIF ABS(NEW.variance_percentage) < 15 THEN
+        NEW.gap_severity := 'MODERATE';
+    ELSIF ABS(NEW.variance_percentage) < 30 THEN
+        NEW.gap_severity := 'MAJOR';
+    ELSE
+        NEW.gap_severity := 'CRITICAL';
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
+-- TRIGGER: Auto-calculate performance_gap on INSERT/UPDATE
+-- =============================================================================
+DROP TRIGGER IF EXISTS trg_schedule_benchmarking_calculate_gap 
+    ON scheduling.schedule_benchmarking;
+CREATE TRIGGER trg_schedule_benchmarking_calculate_gap
+    BEFORE INSERT OR UPDATE OF benchmark_value, actual_value ON scheduling.schedule_benchmarking
+    FOR EACH ROW
+    EXECUTE FUNCTION scheduling.calculate_performance_gap();
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE (aligned with schema standards)
+-- =============================================================================
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_schedule
+    ON scheduling.schedule_benchmarking(schedule_id, benchmark_period_end DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_source
+    ON scheduling.schedule_benchmarking(benchmark_source, metric_category);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_performance
+    ON scheduling.schedule_benchmarking(performance_gap, gap_severity NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_variance
+    ON scheduling.schedule_benchmarking(variance_percentage DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_status
+    ON scheduling.schedule_benchmarking(status, target_achievement_date NULLS FIRST);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_department
+    ON scheduling.schedule_benchmarking(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_location
+    ON scheduling.schedule_benchmarking(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_metadata
+    ON scheduling.schedule_benchmarking USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_schedule_benchmarking_severity
+    ON scheduling.schedule_benchmarking(gap_severity) 
+    WHERE gap_severity IS NOT NULL;
+
+-- =============================================================================
+-- TRIGGER FOR UPDATED_AT (aligned with schema standards)
+-- =============================================================================
+DROP TRIGGER IF EXISTS trg_schedule_benchmarking_updated_at 
+    ON scheduling.schedule_benchmarking;
+CREATE TRIGGER trg_schedule_benchmarking_updated_at
+    BEFORE UPDATE ON scheduling.schedule_benchmarking
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- =============================================================================
+-- COMMENTS (aligned with schema documentation standards)
+-- =============================================================================
+COMMENT ON TABLE scheduling.schedule_benchmarking IS 
+'Benchmarks schedule performance against industry standards, competitors, and best practices.
+Enables comparison of schedule performance against industry benchmarks, competitors, and
+internal targets. Supports continuous improvement by identifying performance gaps and
+improvement opportunities. Provides competitive intelligence and strategic insights.
+Aligned with enterprise analytics and performance management standards.';
+
+COMMENT ON COLUMN scheduling.schedule_benchmarking.benchmark_id IS 
+'Unique identifier for benchmark record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.benchmark_code IS 
+'Business-readable benchmark code (format: BCH-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.benchmark_source IS 
+'Source of benchmark data (INDUSTRY_STANDARD, COMPETITOR, INTERNAL_HISTORY, etc.)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.metric_category IS 
+'Category of metric being benchmarked (COVERAGE, COST, COMPLIANCE, etc.)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.variance IS 
+'Difference between actual and benchmark value (calculated generated column)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.variance_percentage IS 
+'Percentage variance from benchmark (calculated generated column)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.performance_gap IS 
+'Categorized performance gap (SIGNIFICANTLY_BELOW to SIGNIFICANTLY_ABOVE, calculated by trigger)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.gap_severity IS 
+'Severity of the performance gap (MINOR, MODERATE, MAJOR, CRITICAL, calculated by trigger)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.confidence_level IS 
+'Confidence level in benchmark data (0-100)';
+COMMENT ON COLUMN scheduling.schedule_benchmarking.status IS 
+'Current status of benchmark analysis and improvement tracking';
+
+-- =============================================================================
+-- VERIFICATION QUERY
+-- =============================================================================
+-- Test the table creation and trigger functionality
+SELECT 
+    column_name, 
+    data_type, 
+    is_nullable,
+    column_default,
+    is_generated
+FROM information_schema.columns
+WHERE table_schema = 'scheduling'
+AND table_name = 'schedule_benchmarking'
+ORDER BY ordinal_position;
+
+-- Verify trigger exists
+SELECT 
+    trigger_name, 
+    event_manipulation, 
+    action_timing
+FROM information_schema.triggers
+WHERE event_object_schema = 'scheduling'
+AND event_object_table = 'schedule_benchmarking';
+
+-- =============================================================================
+-- 8. TABLE: scheduling.schedule_communication_log
+-- =============================================================================
+-- Serial No: 49 | TABLE: scheduling.schedule_communication_log
+-- Description: Logs all schedule-related communications for audit and tracking
+-- Business Case: Provides comprehensive logging of all schedule-related communications
+--                including emails, notifications, acknowledgments, and responses.
+--                Supports compliance requirements, dispute resolution, and communication
+--                analysis. Ensures transparency and accountability in scheduling communications.
+-- KPI: 1. Communication logging completeness (>99%), 2. Log retrieval performance (<3 seconds),
+--      3. Audit compliance rate (>99.9%), 4. Communication analysis capability (>95%),
+--      5. Response tracking accuracy (>98%), 6. Log retention compliance (>100%),
+--      7. User satisfaction with communication history (>4/5)
+-- Feature Reference: F-COM-001, F-COM-002, F-COM-003, F-COM-004, F-COM-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.schedule_communication_log CASCADE;
+
+CREATE TABLE scheduling.schedule_communication_log (
+    -- Primary identifiers
+    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    log_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (log_code ~ '^COM-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Communication context (aligned with schema)
+    schedule_id UUID REFERENCES scheduling.schedules(schedule_id),
+    shift_id UUID REFERENCES scheduling.shifts(shift_id),
+    employee_id UUID REFERENCES hr.employees(employee_id),
+    
+    -- Communication details (aligned with communication schema)
+    communication_type VARCHAR(50) NOT NULL
+        CHECK (communication_type IN ('EMAIL', 'SMS', 'PUSH_NOTIFICATION', 'IN_APP_MESSAGE',
+                                     'SYSTEM_ALERT', 'MANAGER_COMMUNICATION', 'EMPLOYEE_FEEDBACK',
+                                     'ANNOUNCEMENT', 'REMINDER', 'ESCALATION')),
+    direction VARCHAR(10) NOT NULL 
+        CHECK (direction IN ('INBOUND', 'OUTBOUND', 'INTERNAL')),
+    channel VARCHAR(50) NOT NULL,
+    
+    -- Content
+    subject VARCHAR(500),
+    body TEXT,
+    attachments TEXT[] DEFAULT '{}',
+    
+    -- Participants (aligned with schema)
+    sender_id UUID REFERENCES hr.employees(employee_id),
+    recipient_ids UUID[] NOT NULL DEFAULT '{}',
+    cc_recipients UUID[] DEFAULT '{}',
+    bcc_recipients UUID[] DEFAULT '{}',
+    
+    -- Delivery and status
+    sent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP WITH TIME ZONE,
+    read_at TIMESTAMP WITH TIME ZONE,
+    acknowledged_at TIMESTAMP WITH TIME ZONE,
+    delivery_status VARCHAR(20) NOT NULL DEFAULT 'SENT'
+        CHECK (delivery_status IN ('SENT', 'DELIVERED', 'READ', 'ACKNOWLEDGED', 'FAILED', 'BOUNCED')),
+    failure_reason TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    
+    -- Response tracking
+    response_required BOOLEAN NOT NULL DEFAULT FALSE,
+    response_received BOOLEAN NOT NULL DEFAULT FALSE,
+    response_id UUID REFERENCES scheduling.schedule_communication_log(log_id),
+    response_text TEXT,
+    
+    -- Priority and importance
+    priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL'
+        CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT', 'CRITICAL')),
+    importance_score INTEGER CHECK (importance_score BETWEEN 1 AND 10),
+    
+    -- Metadata
+    message_id VARCHAR(500),
+    thread_id VARCHAR(500),
+    headers JSONB DEFAULT '{}'::jsonb,
+    
+    -- Compliance (aligned with data_governance schema)
+    retention_period INTERVAL DEFAULT '7 years',
+    archive_status VARCHAR(20) DEFAULT 'ACTIVE' 
+        CHECK (archive_status IN ('ACTIVE', 'ARCHIVED', 'PURGED')),
+    archived_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    full_message JSONB NOT NULL,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_communication_delivery 
+        CHECK (
+            (delivered_at IS NULL OR delivered_at >= sent_at) AND
+            (read_at IS NULL OR read_at >= delivered_at) AND
+            (acknowledged_at IS NULL OR acknowledged_at >= read_at)
+        ),
+    CONSTRAINT chk_response_tracking 
+        CHECK (
+            (response_id IS NULL AND response_received = FALSE) OR
+            (response_id IS NOT NULL AND response_received = TRUE)
+        ),
+    CONSTRAINT chk_archive_status 
+        CHECK (
+            (archive_status = 'ARCHIVED' AND archived_at IS NOT NULL) OR
+            (archive_status IN ('ACTIVE', 'PURGED') AND archived_at IS NULL)
+        ),
+    CONSTRAINT chk_communication_dates 
+        CHECK (updated_at IS NULL OR updated_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_communication_log_schedule
+    ON scheduling.schedule_communication_log(schedule_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_communication_log_employee
+    ON scheduling.schedule_communication_log(employee_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_communication_log_type
+    ON scheduling.schedule_communication_log(communication_type, direction);
+CREATE INDEX IF NOT EXISTS idx_communication_log_status
+    ON scheduling.schedule_communication_log(delivery_status, sent_at);
+CREATE INDEX IF NOT EXISTS idx_communication_log_response
+    ON scheduling.schedule_communication_log(response_id) WHERE response_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_communication_log_recipients
+    ON scheduling.schedule_communication_log USING GIN(recipient_ids);
+CREATE INDEX IF NOT EXISTS idx_communication_log_department
+    ON scheduling.schedule_communication_log(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_communication_log_location
+    ON scheduling.schedule_communication_log(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_communication_log_headers
+    ON scheduling.schedule_communication_log USING GIN(headers);
+CREATE INDEX IF NOT EXISTS idx_communication_log_metadata
+    ON scheduling.schedule_communication_log USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_schedule_communication_log_updated_at 
+    ON scheduling.schedule_communication_log;
+CREATE TRIGGER trg_schedule_communication_log_updated_at
+    BEFORE UPDATE ON scheduling.schedule_communication_log
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.schedule_communication_log IS 
+'Logs all schedule-related communications for audit, tracking, and compliance purposes.
+Provides comprehensive logging of all schedule-related communications including emails,
+notifications, acknowledgments, and responses. Supports compliance requirements, dispute
+resolution, and communication analysis. Ensures transparency and accountability in
+scheduling communications. Aligned with enterprise communication and audit standards.';
+
+COMMENT ON COLUMN scheduling.schedule_communication_log.log_id IS 
+'Unique identifier for communication log record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.log_code IS 
+'Business-readable log code (format: COM-XXX-XXXXXX)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.communication_type IS 
+'Type of communication (EMAIL, SMS, PUSH_NOTIFICATION, etc.)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.direction IS 
+'Direction of communication (INBOUND, OUTBOUND, INTERNAL)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.delivery_status IS 
+'Current delivery status (SENT, DELIVERED, READ, ACKNOWLEDGED, FAILED, BOUNCED)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.retention_period IS 
+'Data retention period for compliance (default 7 years)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.archive_status IS 
+'Archive status (ACTIVE, ARCHIVED, PURGED)';
+COMMENT ON COLUMN scheduling.schedule_communication_log.full_message IS 
+'Complete message content in JSONB format';
+
+-- =============================================================================
+-- 9. TABLE: scheduling.schedule_analytics_cache
+-- =============================================================================
+-- Serial No: 50 | TABLE: scheduling.schedule_analytics_cache
+-- Description: Caches pre-computed analytics and reports for performance optimization
+-- Business Case: Improves system performance by caching frequently accessed analytics,
+--                reports, and aggregated data. Reduces database load and improves
+--                response times for dashboards and reports. Supports scheduled cache
+--                refresh and intelligent cache invalidation.
+-- KPI: 1. Cache hit rate (>85%), 2. Response time improvement (>70%),
+--      3. Database load reduction (>60%), 4. Cache freshness (>95%),
+--      5. Memory utilization efficiency (>80%), 6. Cache invalidation accuracy (>98%),
+--      7. User satisfaction with performance (>4/5)
+-- Feature Reference: F-CCH-001, F-CCH-002, F-CCH-003, F-CCH-004, F-CCH-005
+-- =============================================================================
+
+DROP TABLE IF EXISTS scheduling.schedule_analytics_cache CASCADE;
+
+CREATE TABLE scheduling.schedule_analytics_cache (
+    -- Primary identifiers
+    cache_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cache_key VARCHAR(500) UNIQUE NOT NULL,
+    
+    -- Cache context
+    cache_type VARCHAR(50) NOT NULL
+        CHECK (cache_type IN ('AGGREGATED_METRICS', 'TREND_ANALYSIS', 'FORECAST',
+                             'COMPARISON', 'BENCHMARK', 'DASHBOARD', 'REPORT')),
+    data_scope VARCHAR(100) NOT NULL,
+    parameters_hash VARCHAR(64) NOT NULL,
+    
+    -- Cache data
+    cached_data JSONB NOT NULL,
+    data_format VARCHAR(20) NOT NULL DEFAULT 'JSON' 
+        CHECK (data_format IN ('JSON', 'CSV', 'XML', 'BINARY')),
+    compression_used BOOLEAN NOT NULL DEFAULT FALSE,
+    
+    -- Performance metrics
+    data_size_bytes INTEGER NOT NULL CHECK (data_size_bytes > 0),
+    computation_time INTERVAL NOT NULL,
+    original_query TEXT,
+    
+    -- Cache lifecycle
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_accessed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    accessed_count INTEGER NOT NULL DEFAULT 0 CHECK (accessed_count >= 0),
+    
+    -- Refresh and invalidation
+    refresh_frequency VARCHAR(20) NOT NULL
+        CHECK (refresh_frequency IN ('REALTIME', 'HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY', 'ON_DEMAND')),
+    last_refreshed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    next_refresh_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    invalidated BOOLEAN NOT NULL DEFAULT FALSE,
+    invalidation_reason TEXT,
+    
+    -- Dependencies
+    dependent_entities JSONB DEFAULT '{}'::jsonb,
+    dependency_graph JSONB DEFAULT '{}'::jsonb,
+    
+    -- Quality metrics
+    data_freshness_score NUMERIC(5,2) CHECK (data_freshness_score BETWEEN 0 AND 100),
+    cache_hit_rate NUMERIC(5,2) CHECK (cache_hit_rate BETWEEN 0 AND 100),
+    performance_improvement NUMERIC(5,2) CHECK (performance_improvement BETWEEN 0 AND 100),
+    
+    -- Status
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'STALE', 'EXPIRED', 'INVALIDATED', 'ARCHIVED')),
+    
+    -- Organizational context (aligned with schema)
+    department_id UUID REFERENCES hr.departments(department_id),
+    location_id UUID REFERENCES operations.locations(location_id),
+    
+    -- Audit columns (aligned with schema standards)
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- System metadata
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_cache_expiry 
+        CHECK (expires_at > created_at),
+    CONSTRAINT chk_refresh_schedule 
+        CHECK (next_refresh_at > last_refreshed_at),
+    CONSTRAINT chk_cache_access 
+        CHECK (last_accessed_at >= created_at),
+    CONSTRAINT chk_cache_dates 
+        CHECK (updated_at IS NULL OR updated_at >= created_at)
+);
+
+-- Indexes for performance (aligned with schema standards)
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_type
+    ON scheduling.schedule_analytics_cache(cache_type, status);
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_expiry
+    ON scheduling.schedule_analytics_cache(expires_at) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_refresh
+    ON scheduling.schedule_analytics_cache(next_refresh_at) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_access
+    ON scheduling.schedule_analytics_cache(last_accessed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_hit_rate
+    ON scheduling.schedule_analytics_cache(cache_hit_rate DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_department
+    ON scheduling.schedule_analytics_cache(department_id) 
+    WHERE department_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_location
+    ON scheduling.schedule_analytics_cache(location_id) 
+    WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_data
+    ON scheduling.schedule_analytics_cache USING GIN(cached_data);
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_dependencies
+    ON scheduling.schedule_analytics_cache USING GIN(dependent_entities);
+CREATE INDEX IF NOT EXISTS idx_analytics_cache_metadata
+    ON scheduling.schedule_analytics_cache USING GIN(metadata);
+
+-- Trigger for updated_at (aligned with schema standards)
+DROP TRIGGER IF EXISTS trg_schedule_analytics_cache_updated_at 
+    ON scheduling.schedule_analytics_cache;
+CREATE TRIGGER trg_schedule_analytics_cache_updated_at
+    BEFORE UPDATE ON scheduling.schedule_analytics_cache
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Comments (aligned with schema documentation standards)
+COMMENT ON TABLE scheduling.schedule_analytics_cache IS 
+'Caches pre-computed analytics and reports for performance optimization with intelligent
+refresh and invalidation. Improves system performance by caching frequently accessed
+analytics, reports, and aggregated data. Reduces database load and improves response
+times for dashboards and reports. Supports scheduled cache refresh and intelligent
+cache invalidation. Aligned with enterprise performance and analytics standards.';
+
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.cache_id IS 
+'Unique identifier for cache record (UUID)';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.cache_key IS 
+'Unique cache key for lookup and invalidation';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.cache_type IS 
+'Type of cached data (AGGREGATED_METRICS, TREND_ANALYSIS, FORECAST, etc.)';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.cached_data IS 
+'Cached data in JSONB format';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.data_freshness_score IS 
+'Score indicating data freshness (0-100, higher=fresher)';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.cache_hit_rate IS 
+'Percentage of cache requests that were hits (0-100)';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.performance_improvement IS 
+'Performance improvement percentage from caching (0-100)';
+COMMENT ON COLUMN scheduling.schedule_analytics_cache.dependency_graph IS 
+'JSONB graph of cache dependencies for invalidation';
+
+-- =============================================================================
+-- 10. VIEWS FOR ANALYTICS AND REPORTING
+-- =============================================================================
+
+-- View: Export Template Usage Analytics
+CREATE OR REPLACE VIEW scheduling.vw_export_template_usage AS
+SELECT
+    set.template_id,
+    set.template_code,
+    set.template_name,
+    set.export_format,
+    set.target_system,
+    set.is_active,
+    set.usage_count,
+    set.success_count,
+    set.failure_count,
+    CASE
+        WHEN set.usage_count > 0 
+        THEN ROUND((set.success_count::NUMERIC / set.usage_count * 100), 2)
+        ELSE 0
+    END AS success_rate,
+    set.average_export_time,
+    set.average_file_size_bytes,
+    set.last_used_at,
+    set.created_at,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_export_templates set
+LEFT JOIN hr.departments d ON set.department_id = d.department_id
+LEFT JOIN operations.locations l ON set.location_id = l.location_id
+LEFT JOIN hr.employees creator ON set.created_by = creator.employee_id
+ORDER BY set.usage_count DESC, set.template_name;
+
+COMMENT ON VIEW scheduling.vw_export_template_usage IS 
+'Analytics view for export template usage, success rates, and performance metrics';
+
+-- View: Workload Distribution Summary
+CREATE OR REPLACE VIEW scheduling.vw_workload_distribution_summary AS
+SELECT
+    wd.distribution_id,
+    wd.distribution_code,
+    wd.schedule_id,
+    s.schedule_code,
+    wd.analysis_period_start,
+    wd.analysis_period_end,
+    wd.employee_count,
+    wd.workload_balance_score,
+    wd.fairness_index,
+    wd.gini_coefficient,
+    wd.burnout_risk_score,
+    wd.status,
+    wd.improvement_achieved,
+    wd.balance_improvement,
+    wd.underloaded_employees,
+    wd.optimally_loaded_employees,
+    wd.overloaded_employees,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.workload_distribution wd
+LEFT JOIN scheduling.schedules s ON wd.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON wd.department_id = d.department_id
+LEFT JOIN operations.locations l ON wd.location_id = l.location_id
+LEFT JOIN hr.employees creator ON wd.created_by = creator.employee_id
+ORDER BY wd.analysis_period_end DESC, wd.workload_balance_score ASC;
+
+COMMENT ON VIEW scheduling.vw_workload_distribution_summary IS 
+'Summary view of workload distribution analysis with balance scores and risk metrics';
+
+-- View: Approval Workflow Performance
+CREATE OR REPLACE VIEW scheduling.vw_approval_workflow_performance AS
+SELECT
+    saw.workflow_id,
+    saw.workflow_code,
+    saw.workflow_name,
+    saw.workflow_type,
+    saw.is_active,
+    saw.usage_count,
+    saw.success_rate,
+    saw.escalation_rate,
+    saw.average_completion_time,
+    saw.default_sla,
+    saw.effective_start_date,
+    saw.effective_end_date,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_approval_workflow saw
+LEFT JOIN hr.departments d ON saw.department_id = d.department_id
+LEFT JOIN operations.locations l ON saw.location_id = l.location_id
+LEFT JOIN hr.employees creator ON saw.created_by = creator.employee_id
+WHERE saw.is_active = TRUE
+ORDER BY saw.usage_count DESC, saw.success_rate ASC;
+
+COMMENT ON VIEW scheduling.vw_approval_workflow_performance IS 
+'Performance metrics for approval workflows including success rates and completion times';
+
+-- View: Compliance Rule Engine Metrics
+CREATE OR REPLACE VIEW scheduling.vw_compliance_engine_metrics AS
+SELECT
+    cre.execution_id,
+    cre.execution_code,
+    cre.schedule_id,
+    s.schedule_code,
+    cre.execution_type,
+    cre.execution_mode,
+    cre.status,
+    cre.outcome,
+    cre.rules_evaluated,
+    cre.rules_passed,
+    cre.rules_failed,
+    cre.pass_rate,
+    cre.execution_duration,
+    cre.started_at,
+    cre.completed_at,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.compliance_rule_engine cre
+LEFT JOIN scheduling.schedules s ON cre.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON cre.department_id = d.department_id
+LEFT JOIN operations.locations l ON cre.location_id = l.location_id
+LEFT JOIN hr.employees creator ON cre.created_by = creator.employee_id
+ORDER BY cre.started_at DESC;
+
+COMMENT ON VIEW scheduling.vw_compliance_engine_metrics IS 
+'Metrics for compliance rule engine executions including pass rates and performance';
+
+-- View: Preference Matching Results
+CREATE OR REPLACE VIEW scheduling.vw_preference_matching_results AS
+SELECT
+    pm.matching_id,
+    pm.matching_code,
+    pm.schedule_id,
+    s.schedule_code,
+    pm.matching_round,
+    pm.algorithm_type,
+    pm.status,
+    pm.outcome,
+    pm.matches_made,
+    pm.matches_possible,
+    pm.match_rate,
+    pm.average_preference_score,
+    pm.weighted_satisfaction_score,
+    pm.fairness_score,
+    pm.processing_time,
+    pm.implemented,
+    pm.employee_feedback_score,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.employee_schedule_preferences_matching pm
+LEFT JOIN scheduling.schedules s ON pm.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON pm.department_id = d.department_id
+LEFT JOIN operations.locations l ON pm.location_id = l.location_id
+LEFT JOIN hr.employees creator ON pm.created_by = creator.employee_id
+ORDER BY pm.started_at DESC, pm.match_rate DESC;
+
+COMMENT ON VIEW scheduling.vw_preference_matching_results IS 
+'Results of employee preference matching with satisfaction and fairness scores';
+
+-- View: Benchmark Performance Analysis
+CREATE OR REPLACE VIEW scheduling.vw_benchmark_performance AS
+SELECT
+    sb.benchmark_id,
+    sb.benchmark_code,
+    sb.schedule_id,
+    s.schedule_code,
+    sb.benchmark_source,
+    sb.source_name,
+    sb.metric_category,
+    sb.metric_name,
+    sb.metric_unit,
+    sb.benchmark_value,
+    sb.actual_value,
+    sb.variance,
+    sb.variance_percentage,
+    sb.performance_gap,
+    sb.gap_severity,
+    sb.confidence_level,
+    sb.status,
+    sb.improvement_target,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_benchmarking sb
+LEFT JOIN scheduling.schedules s ON sb.schedule_id = s.schedule_id
+LEFT JOIN hr.departments d ON sb.department_id = d.department_id
+LEFT JOIN operations.locations l ON sb.location_id = l.location_id
+LEFT JOIN hr.employees creator ON sb.created_by = creator.employee_id
+ORDER BY sb.benchmark_period_end DESC, sb.variance_percentage ASC;
+
+COMMENT ON VIEW scheduling.vw_benchmark_performance IS 
+'Benchmark performance analysis with variance and gap analysis';
+
+-- View: Communication Log Summary
+CREATE OR REPLACE VIEW scheduling.vw_communication_log_summary AS
+SELECT
+    scl.log_id,
+    scl.log_code,
+    scl.schedule_id,
+    scl.employee_id,
+    e.employee_code,
+    e.first_name || ' ' || e.last_name AS employee_name,
+    scl.communication_type,
+    scl.direction,
+    scl.channel,
+    scl.delivery_status,
+    scl.priority,
+    scl.sent_at,
+    scl.delivered_at,
+    scl.read_at,
+    scl.response_received,
+    d.department_name,
+    l.location_name,
+    sender.first_name || ' ' || sender.last_name AS sender_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_communication_log scl
+LEFT JOIN hr.employees e ON scl.employee_id = e.employee_id
+LEFT JOIN hr.departments d ON scl.department_id = d.department_id
+LEFT JOIN operations.locations l ON scl.location_id = l.location_id
+LEFT JOIN hr.employees sender ON scl.sender_id = sender.employee_id
+ORDER BY scl.sent_at DESC;
+
+COMMENT ON VIEW scheduling.vw_communication_log_summary IS 
+'Summary of schedule-related communications with delivery and response tracking';
+
+-- View: Cache Performance Metrics
+CREATE OR REPLACE VIEW scheduling.vw_cache_performance AS
+SELECT
+    sac.cache_id,
+    sac.cache_key,
+    sac.cache_type,
+    sac.data_scope,
+    sac.status,
+    sac.data_size_bytes,
+    sac.computation_time,
+    sac.accessed_count,
+    sac.data_freshness_score,
+    sac.cache_hit_rate,
+    sac.performance_improvement,
+    sac.created_at,
+    sac.expires_at,
+    sac.last_accessed_at,
+    sac.next_refresh_at,
+    sac.invalidated,
+    d.department_name,
+    l.location_name,
+    creator.first_name || ' ' || creator.last_name AS created_by_name,
+    CURRENT_TIMESTAMP AS calculated_at
+FROM scheduling.schedule_analytics_cache sac
+LEFT JOIN hr.departments d ON sac.department_id = d.department_id
+LEFT JOIN operations.locations l ON sac.location_id = l.location_id
+LEFT JOIN hr.employees creator ON sac.created_by = creator.employee_id
+WHERE sac.status = 'ACTIVE'
+ORDER BY sac.accessed_count DESC, sac.cache_hit_rate DESC;
+
+COMMENT ON VIEW scheduling.vw_cache_performance IS 
+'Performance metrics for analytics cache including hit rates and freshness scores';
+
+-- =============================================================================
+-- 11. FUNCTIONS FOR BUSINESS LOGIC
+-- =============================================================================
+
+-- Function: Calculate Export Template Success Rate
+CREATE OR REPLACE FUNCTION scheduling.calculate_export_success_rate(
+    p_template_id UUID
+)
+RETURNS NUMERIC(5,2) AS $$
+DECLARE
+    v_success_rate NUMERIC(5,2);
+BEGIN
+    SELECT 
+        CASE
+            WHEN usage_count > 0 THEN (success_count::NUMERIC / usage_count * 100)
+            ELSE 0
+        END
+    INTO v_success_rate
+    FROM scheduling.schedule_export_templates
+    WHERE template_id = p_template_id;
+    
+    RETURN COALESCE(v_success_rate, 0);
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+COMMENT ON FUNCTION scheduling.calculate_export_success_rate(UUID) IS 
+'Calculates success rate for a specific export template';
+
+-- Function: Get Workload Balance Score
+CREATE OR REPLACE FUNCTION scheduling.get_workload_balance_score(
+    p_schedule_id UUID,
+    p_start_date DATE,
+    p_end_date DATE
+)
+RETURNS NUMERIC(5,2) AS $$
+DECLARE
+    v_balance_score NUMERIC(5,2);
+BEGIN
+    SELECT MAX(workload_balance_score)
+    INTO v_balance_score
+    FROM scheduling.workload_distribution
+    WHERE schedule_id = p_schedule_id
+    AND analysis_period_start <= p_end_date
+    AND analysis_period_end >= p_start_date;
+    
+    RETURN COALESCE(v_balance_score, 0);
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+COMMENT ON FUNCTION scheduling.get_workload_balance_score(UUID, DATE, DATE) IS 
+'Retrieves workload balance score for a schedule within date range';
+
+-- Function: Validate Approval Workflow
+CREATE OR REPLACE FUNCTION scheduling.validate_approval_workflow(
+    p_workflow_id UUID,
+    p_schedule_id UUID
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_is_valid BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM scheduling.schedule_approval_workflow
+        WHERE workflow_id = p_workflow_id
+        AND is_active = TRUE
+        AND effective_start_date <= CURRENT_DATE
+        AND (effective_end_date IS NULL OR effective_end_date >= CURRENT_DATE)
+    ) INTO v_is_valid;
+    
+    RETURN v_is_valid;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+COMMENT ON FUNCTION scheduling.validate_approval_workflow(UUID, UUID) IS 
+'Validates if approval workflow is active and applicable';
+
+-- Function: Get Compliance Pass Rate
+CREATE OR REPLACE FUNCTION scheduling.get_compliance_pass_rate(
+    p_schedule_id UUID
+)
+RETURNS NUMERIC(5,2) AS $$
+DECLARE
+    v_pass_rate NUMERIC(5,2);
+BEGIN
+    SELECT AVG(pass_rate)
+    INTO v_pass_rate
+    FROM scheduling.compliance_rule_engine
+    WHERE schedule_id = p_schedule_id
+    AND status = 'COMPLETED'
+    AND completed_at >= CURRENT_TIMESTAMP - INTERVAL '30 days';
+    
+    RETURN COALESCE(v_pass_rate, 0);
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+COMMENT ON FUNCTION scheduling.get_compliance_pass_rate(UUID) IS 
+'Calculates average compliance pass rate for a schedule';
+
+-- Function: Invalidate Cache by Dependency
+CREATE OR REPLACE FUNCTION scheduling.invalidate_cache_by_dependency(
+    p_entity_type VARCHAR(50),
+    p_entity_id UUID
+)
+RETURNS INTEGER AS $$
+DECLARE
+    v_invalidated_count INTEGER;
+BEGIN
+    UPDATE scheduling.schedule_analytics_cache
+    SET 
+        invalidated = TRUE,
+        invalidation_reason = format('Entity %s %s changed', p_entity_type, p_entity_id),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE dependent_entities ? p_entity_type
+    AND status = 'ACTIVE';
+    
+    GET DIAGNOSTICS v_invalidated_count = ROW_COUNT;
+    
+    RETURN v_invalidated_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMENT ON FUNCTION scheduling.invalidate_cache_by_dependency(VARCHAR, UUID) IS 
+'Invalidates cache entries dependent on a specific entity';
+
+-- =============================================================================
+-- 12. ROW LEVEL SECURITY POLICIES (Aligned with Schema Standards)
+-- =============================================================================
+
+-- Enable RLS on export templates
+ALTER TABLE scheduling.schedule_export_templates ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can only access templates for their department
+CREATE POLICY export_templates_department_policy 
+    ON scheduling.schedule_export_templates
+    FOR ALL
+    USING (
+        department_id IS NULL OR
+        department_id IN (
+            SELECT department_id 
+            FROM hr.employees 
+            WHERE employee_id = current_setting('app.user_id', true)::UUID
+        ) OR
+        current_setting('app.role', true) IN ('ADMIN', 'HR', 'FINANCE')
+    );
+
+-- Enable RLS on workload distribution
+ALTER TABLE scheduling.workload_distribution ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can only access workload data for their department
+CREATE POLICY workload_distribution_department_policy 
+    ON scheduling.workload_distribution
+    FOR ALL
+    USING (
+        department_id IS NULL OR
+        department_id IN (
+            SELECT department_id 
+            FROM hr.employees 
+            WHERE employee_id = current_setting('app.user_id', true)::UUID
+        ) OR
+        current_setting('app.role', true) IN ('ADMIN', 'HR', 'FINANCE')
+    );
+
+-- Enable RLS on communication log
+ALTER TABLE scheduling.schedule_communication_log ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can only access their own communications or department communications
+CREATE POLICY communication_log_access_policy 
+    ON scheduling.schedule_communication_log
+    FOR ALL
+    USING (
+        employee_id = current_setting('app.user_id', true)::UUID OR
+        sender_id = current_setting('app.user_id', true)::UUID OR
+        department_id IN (
+            SELECT department_id 
+            FROM hr.employees 
+            WHERE employee_id = current_setting('app.user_id', true)::UUID
+        ) OR
+        current_setting('app.role', true) IN ('ADMIN', 'HR', 'MANAGER')
+    );
+
+-- =============================================================================
+-- 13. MAINTENANCE PROCEDURES
+-- =============================================================================
+
+-- Procedure: Archive Old Communication Logs
+CREATE OR REPLACE PROCEDURE scheduling.archive_old_communication_logs(
+    p_days_old INTEGER DEFAULT 365,
+    p_batch_size INTEGER DEFAULT 1000
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_archived_count INTEGER;
+BEGIN
+    -- Archive old communication logs
+    WITH archived AS (
+        UPDATE scheduling.schedule_communication_log
+        SET 
+            archive_status = 'ARCHIVED',
+            archived_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE log_id IN (
+            SELECT log_id
+            FROM scheduling.schedule_communication_log
+            WHERE sent_at < CURRENT_TIMESTAMP - (p_days_old || ' days')::INTERVAL
+            AND archive_status = 'ACTIVE'
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    INSERT INTO scheduling.schedule_communication_log_archive
+    SELECT * FROM archived;
+    
+    GET DIAGNOSTICS v_archived_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Archived % old communication logs', v_archived_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_ARCHIVE',
+        'scheduling.archive_old_communication_logs',
+        format('Archived %s communication logs older than %s days', v_archived_count, p_days_old),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('archived_count', v_archived_count, 'days_old', p_days_old)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.archive_old_communication_logs IS 
+'Archives old communication logs to maintain table performance and compliance';
+
+-- Procedure: Clean Expired Cache Entries
+CREATE OR REPLACE PROCEDURE scheduling.clean_expired_cache(
+    p_batch_size INTEGER DEFAULT 500
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_deleted_count INTEGER;
+BEGIN
+    -- Delete expired cache entries
+    WITH deleted AS (
+        DELETE FROM scheduling.schedule_analytics_cache
+        WHERE cache_id IN (
+            SELECT cache_id
+            FROM scheduling.schedule_analytics_cache
+            WHERE expires_at < CURRENT_TIMESTAMP
+            AND status = 'ACTIVE'
+            LIMIT p_batch_size
+        )
+        RETURNING *
+    )
+    INSERT INTO scheduling.schedule_analytics_cache_archive
+    SELECT * FROM deleted;
+    
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    
+    RAISE NOTICE 'Cleaned % expired cache entries', v_deleted_count;
+    
+    -- Log the operation
+    INSERT INTO system.maintenance_logs (
+        log_type,
+        component,
+        message,
+        started_at,
+        completed_at,
+        status,
+        metadata
+    ) VALUES (
+        'DATA_CLEANUP',
+        'scheduling.clean_expired_cache',
+        format('Cleaned %s expired cache entries', v_deleted_count),
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        'SUCCESS',
+        jsonb_build_object('deleted_count', v_deleted_count)
+    );
+END;
+$$;
+
+COMMENT ON PROCEDURE scheduling.clean_expired_cache IS 
+'Clean up expired cache entries to free storage and maintain performance';
+
+-- =============================================================================
+-- 14. PERMISSION GRANTS (Aligned with Schema Standards)
+-- =============================================================================
+
+-- -- Grant SELECT on tables to reporting role
+-- GRANT SELECT ON scheduling.schedule_export_templates TO reporting_role;
+-- GRANT SELECT ON scheduling.workload_distribution TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_approval_workflow TO reporting_role;
+-- GRANT SELECT ON scheduling.compliance_rule_engine TO reporting_role;
+-- GRANT SELECT ON scheduling.employee_schedule_preferences_matching TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_benchmarking TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_communication_log TO reporting_role;
+-- GRANT SELECT ON scheduling.schedule_analytics_cache TO reporting_role;
+
+-- -- Grant SELECT on views to reporting role
+-- GRANT SELECT ON scheduling.vw_export_template_usage TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_workload_distribution_summary TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_approval_workflow_performance TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_compliance_engine_metrics TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_preference_matching_results TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_benchmark_performance TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_communication_log_summary TO reporting_role;
+-- GRANT SELECT ON scheduling.vw_cache_performance TO reporting_role;
+
+-- -- Grant appropriate permissions to manager role
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.schedule_export_templates TO manager_role;
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.workload_distribution TO manager_role;
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.schedule_approval_workflow TO manager_role;
+-- GRANT SELECT ON scheduling.compliance_rule_engine TO manager_role;
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.employee_schedule_preferences_matching TO manager_role;
+-- GRANT SELECT, INSERT, UPDATE ON scheduling.schedule_benchmarking TO manager_role;
+-- GRANT SELECT, INSERT ON scheduling.schedule_communication_log TO manager_role;
+-- GRANT SELECT ON scheduling.schedule_analytics_cache TO manager_role;
+
+-- -- Grant EXECUTE on functions to appropriate roles
+-- GRANT EXECUTE ON FUNCTION scheduling.calculate_export_success_rate(UUID) TO manager_role, reporting_role;
+-- GRANT EXECUTE ON FUNCTION scheduling.get_workload_balance_score(UUID, DATE, DATE) TO manager_role, reporting_role;
+-- GRANT EXECUTE ON FUNCTION scheduling.validate_approval_workflow(UUID, UUID) TO manager_role, admin_role;
+-- GRANT EXECUTE ON FUNCTION scheduling.get_compliance_pass_rate(UUID) TO manager_role, reporting_role, compliance_role;
+-- GRANT EXECUTE ON FUNCTION scheduling.invalidate_cache_by_dependency(VARCHAR, UUID) TO admin_role, scheduler_role;
+
+-- -- Grant EXECUTE on procedures to admin role
+-- GRANT EXECUTE ON PROCEDURE scheduling.archive_old_communication_logs(INTEGER, INTEGER) TO admin_role;
+-- GRANT EXECUTE ON PROCEDURE scheduling.clean_expired_cache(INTEGER) TO admin_role, scheduler_role;
+
+-- =============================================================================
+-- 15. VERIFICATION QUERIES
+-- =============================================================================
+
+-- Verify all tables exist
+SELECT 
+    table_name,
+    table_schema
+FROM information_schema.tables
+WHERE table_schema = 'scheduling'
+AND table_name IN (
+    'schedule_export_templates',
+    'workload_distribution',
+    'schedule_approval_workflow',
+    'compliance_rule_engine',
+    'employee_schedule_preferences_matching',
+    'schedule_benchmarking',
+    'schedule_communication_log',
+    'schedule_analytics_cache'
+)
+ORDER BY table_name;
+
+-- Verify all views exist
+SELECT 
+    table_name,
+    table_schema
+FROM information_schema.views
+WHERE table_schema = 'scheduling'
+AND table_name LIKE 'vw_%'
+ORDER BY table_name;
+
+-- Verify all functions exist
+SELECT 
+    routine_name,
+    routine_type,
+    data_type
+FROM information_schema.routines
+WHERE routine_schema = 'scheduling'
+AND routine_name LIKE '%export%' 
+   OR routine_name LIKE '%workload%' 
+   OR routine_name LIKE '%approval%' 
+   OR routine_name LIKE '%compliance%' 
+   OR routine_name LIKE '%cache%'
+ORDER BY routine_name;
+
+-- Verify all indexes exist
+SELECT 
+    tablename,
+    indexname,
+    indexdef
+FROM pg_indexes
+WHERE schemaname = 'scheduling'
+AND (tablename LIKE '%export%' 
+     OR tablename LIKE '%workload%' 
+     OR tablename LIKE '%approval%' 
+     OR tablename LIKE '%compliance%' 
+     OR tablename LIKE '%cache%')
+ORDER BY tablename, indexname;
+
+-- Verify all triggers exist
+SELECT 
+    trigger_name,
+    event_object_table,
+    action_timing,
+    event_manipulation
+FROM information_schema.triggers
+WHERE trigger_schema = 'scheduling'
+AND event_object_table IN (
+    'schedule_export_templates',
+    'workload_distribution',
+    'schedule_approval_workflow',
+    'compliance_rule_engine',
+    'employee_schedule_preferences_matching',
+    'schedule_benchmarking',
+    'schedule_communication_log',
+    'schedule_analytics_cache'
+)
+ORDER BY event_object_table, trigger_name;
+
+
+
+-- =============================================================================
+-- Serial No: 51 | TABLE: scheduling.notification_templates
+-- =============================================================================
+-- Description: Templates for scheduling-related notifications and communications
+-- Business Case: Enables consistent, branded communication for scheduling events
+--   while supporting multiple channels, languages, and personalization. Reduces
+--   communication errors and ensures compliance with notification requirements.
+-- KPI: Template usage rate, Communication consistency score, Delivery success rate
+-- Feature Reference: F-COMM-001, F-COMM-002, F-COMM-003
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduling.notification_templates (
+    -- Primary identifiers
+    template_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    template_code VARCHAR(50) UNIQUE NOT NULL 
+        CHECK (template_code ~ '^NTP-[A-Z0-9]{3,8}-[A-Z0-9]{6}$'),
+    
+    -- Core template information
+    template_name VARCHAR(200) NOT NULL,
+    description TEXT,
+    notification_type communication.notification_type_enum NOT NULL,
+    
+    -- Template content
+    subject_template TEXT NOT NULL,
+    body_template TEXT NOT NULL,
+    variables JSONB DEFAULT '{}'::jsonb,
+    variable_descriptions JSONB DEFAULT '{}'::jsonb,
+    
+    -- Format and delivery
+    format_type VARCHAR(20) NOT NULL DEFAULT 'HTML' 
+        CHECK (format_type IN ('HTML', 'PLAIN_TEXT', 'MARKDOWN')),
+    delivery_channels communication.channel_type_enum[] NOT NULL DEFAULT '{"EMAIL"}',
+    
+    -- Localization
+    language_code VARCHAR(10) NOT NULL DEFAULT 'en',
+    region_code VARCHAR(10),
+    is_default_for_language BOOLEAN DEFAULT FALSE,
+    
+    -- Status and version
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_system_template BOOLEAN DEFAULT FALSE,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    based_on_template_id UUID REFERENCES scheduling.notification_templates(template_id),
+    
+    -- Approval workflow
+    approval_status VARCHAR(20) NOT NULL DEFAULT 'DRAFT'
+        CHECK (approval_status IN ('DRAFT', 'REVIEW', 'APPROVED', 'REJECTED', 'RETIRED')),
+    approved_by UUID REFERENCES hr.employees(employee_id),
+    approved_at TIMESTAMP WITH TIME ZONE,
+    approval_notes TEXT,
+    
+    -- Usage tracking
+    usage_count INTEGER DEFAULT 0,
+    last_used_at TIMESTAMP WITH TIME ZONE,
+    last_used_by UUID REFERENCES hr.employees(employee_id),
+    
+    -- Audit columns
+    created_by UUID NOT NULL REFERENCES hr.employees(employee_id),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by UUID REFERENCES hr.employees(employee_id),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Standard metadata columns
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    
+    -- Constraints
+    CONSTRAINT chk_template_channels CHECK (
+        delivery_channels <@ ARRAY['EMAIL', 'SMS', 'PUSH', 'IN_APP']::communication.channel_type_enum[]
+    ),
+    CONSTRAINT chk_template_content CHECK (
+        LENGTH(TRIM(subject_template)) > 0 AND
+        LENGTH(TRIM(body_template)) > 0
+    ),
+    CONSTRAINT chk_template_dates CHECK (
+        approved_at IS NULL OR approved_at >= created_at
+    )
+);
+
+-- =============================================================================
+-- INDEXES FOR PERFORMANCE
+-- =============================================================================
+CREATE INDEX IF NOT EXISTS idx_notification_templates_code 
+ON scheduling.notification_templates(template_code);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_type 
+ON scheduling.notification_templates(notification_type);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_active 
+ON scheduling.notification_templates(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_notification_templates_language 
+ON scheduling.notification_templates(language_code, region_code);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_approval 
+ON scheduling.notification_templates(approval_status);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_system 
+ON scheduling.notification_templates(is_system_template) WHERE is_system_template = TRUE;
+CREATE INDEX IF NOT EXISTS idx_notification_templates_default 
+ON scheduling.notification_templates(is_default_for_language) WHERE is_default_for_language = TRUE;
+CREATE INDEX IF NOT EXISTS idx_notification_templates_version 
+ON scheduling.notification_templates(template_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_metadata 
+ON scheduling.notification_templates USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_tags 
+ON scheduling.notification_templates USING GIN(tags);
+CREATE INDEX IF NOT EXISTS idx_notification_templates_variables 
+ON scheduling.notification_templates USING GIN(variables);
+
+-- =============================================================================
+-- TRIGGERS FOR AUTOMATION
+-- =============================================================================
+DROP TRIGGER IF EXISTS trg_notification_templates_updated_at 
+ON scheduling.notification_templates;
+CREATE TRIGGER trg_notification_templates_updated_at
+BEFORE UPDATE ON scheduling.notification_templates
+FOR EACH ROW
+EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Trigger to track usage
+CREATE OR REPLACE FUNCTION scheduling.track_template_usage()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.usage_count IS DISTINCT FROM NEW.usage_count THEN
+        NEW.last_used_at := CURRENT_TIMESTAMP;
+        NEW.last_used_by := NEW.updated_by;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_notification_templates_usage 
+ON scheduling.notification_templates;
+CREATE TRIGGER trg_notification_templates_usage
+BEFORE UPDATE OF usage_count ON scheduling.notification_templates
+FOR EACH ROW
+EXECUTE FUNCTION scheduling.track_template_usage();
+
+-- =============================================================================
+-- COMMENTS FOR DOCUMENTATION
+-- =============================================================================
+COMMENT ON TABLE scheduling.notification_templates IS 
+'Templates for scheduling-related notifications including shift assignments, 
+schedule changes, compliance alerts, and time-off responses. Supports multiple 
+delivery channels (EMAIL, SMS, PUSH, IN_APP), languages, and personalization 
+variables. Enables consistent, branded communication while reducing errors.';
+
+COMMENT ON COLUMN scheduling.notification_templates.template_id IS 
+'Unique identifier for the template (UUID)';
+COMMENT ON COLUMN scheduling.notification_templates.template_code IS 
+'Business-readable template code (format: NTP-XXX-YYYYYY)';
+COMMENT ON COLUMN scheduling.notification_templates.notification_type IS 
+'Type of notification from communication.notification_type_enum';
+COMMENT ON COLUMN scheduling.notification_templates.subject_template IS 
+'Email/notification subject with variable placeholders';
+COMMENT ON COLUMN scheduling.notification_templates.body_template IS 
+'Email/notification body with variable placeholders';
+COMMENT ON COLUMN scheduling.notification_templates.variables IS 
+'JSONB defining available template variables and their types';
+COMMENT ON COLUMN scheduling.notification_templates.delivery_channels IS 
+'Array of supported delivery channels from communication.channel_type_enum';
+COMMENT ON COLUMN scheduling.notification_templates.language_code IS 
+'ISO 639-1 language code (e.g., en, es, fr)';
+COMMENT ON COLUMN scheduling.notification_templates.region_code IS 
+'ISO 3166-1 region code (e.g., US, CA, GB)';
+COMMENT ON COLUMN scheduling.notification_templates.is_default_for_language IS 
+'Indicates if this is the default template for this language';
+COMMENT ON COLUMN scheduling.notification_templates.approval_status IS 
+'Current approval status in workflow (DRAFT, REVIEW, APPROVED, etc.)';
+COMMENT ON COLUMN scheduling.notification_templates.usage_count IS 
+'Number of times this template has been used';
+COMMENT ON COLUMN scheduling.notification_templates.metadata IS 
+'Flexible JSONB metadata for extensibility';
+COMMENT ON COLUMN scheduling.notification_templates.tags IS 
+'Array of tags for categorization and search';
+
+
 ---=====================================================================================
 
 -- Serial No: P-001 | PROCEDURE: scheduling.refresh_all_materialized_views
