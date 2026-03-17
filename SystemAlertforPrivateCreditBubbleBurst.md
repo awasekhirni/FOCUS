@@ -12,7 +12,9 @@ Lets start building key indicators that would enable us to forecase exposure and
 
 
 #Glossary
+
 Abbreviation	Full Term	Definition	Reference
+
 ACFI	Alternative Credit and Fixed Income	Magnetar Capital's multi-strategy credit platform encompassing structured credit, distressed debt, and liquid credit strategies	(GrowthCap Advisory, 2025)
 AUM	Assets Under Management	Total market value of assets that a financial institution or fund manages on behalf of clients; key metric for firm scale	(S&P Global Market Intelligence, 2025b)
 BDC	Business Development Company	U.S. publicly-traded investment vehicle regulated under the Investment Company Act of 1940, designed to provide capital to small and mid-sized private companies; offers retail investor access to private credit	(U.S. Securities and Exchange Commission, 2025)
@@ -40,7 +42,7 @@ XLF	Financial Select Sector SPDR Fund	ETF tracking the financial sector of the S
 YTD	Year-to-Date	Period from the beginning of the current calendar or fiscal year to the present date; common performance reporting timeframe	(S&P Global Market Intelligence, 2026)
 			
 			
-#Ticker Reference		
+#Ticker Reference	
 			
 Ticker	Full Name	Type	Reference
 ARES	Ares Management Corporation	Public equity (NYSE)	(Investing.com, 2026)
@@ -54,6 +56,7 @@ PSEC	Prospect Capital Corporation	BDC (NASDAQ)	(GrowthCap Advisory, 2025)
 
 
 #References
+
 Bloomberg News. (2026, February 28). Private credit stocks signal more pain is coming. Bloomberg. https://www.bloomberg.com/news/articles/2026-02-28/private-credit-stocks-signal-more-pain-is-coming-credit-weekly
 Fitch Ratings. (2025, December 22). Global private credit's burgeoning scale, complexity to continue in 2026. https://www.fitchratings.com/research/non-bank-financial-institutions/global-private-credits-burgeoning-scale-complexity-to-continue-in-2026-22-12-2025
 Fitch Ratings. (2026, March 6). US private credit defaults hit new highs but losses remain contained. https://www.fitchratings.com/research/corporate-finance/6336fcc7-8612-4276-98e2-f7b826c87ab3-06-03-2026
