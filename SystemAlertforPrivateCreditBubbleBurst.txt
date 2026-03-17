@@ -8,7 +8,53 @@ Lets start building key indicators that would enable us to forecase exposure and
 
 
 
-References
+
+
+
+#Glossary
+
+Abbreviation	Full Term	Definition	Reference
+ACFI	Alternative Credit and Fixed Income	Magnetar Capital's multi-strategy credit platform encompassing structured credit, distressed debt, and liquid credit strategies	(GrowthCap Advisory, 2025)
+AUM	Assets Under Management	Total market value of assets that a financial institution or fund manages on behalf of clients; key metric for firm scale	(S&P Global Market Intelligence, 2025b)
+BDC	Business Development Company	U.S. publicly-traded investment vehicle regulated under the Investment Company Act of 1940, designed to provide capital to small and mid-sized private companies; offers retail investor access to private credit	(U.S. Securities and Exchange Commission, 2025)
+BCRED	Blackstone Private Credit Fund	Blackstone's landmark non-traded BDC offering retail investors access to private credit strategies; reached $82B AUM in 2025	(Private Debt Investor, 2025)
+CRE	Commercial Real Estate	Income-generating property assets (office, retail, industrial, multifamily) often financed through private credit structures	(Fitch Ratings, 2025)
+CLO	Collateralized Loan Obligation	Structured finance vehicle that pools leveraged loans and issues tranches of debt securities with varying risk/return profiles	(S&P Global Market Intelligence, 2025b)
+DPI	Distributed to Paid-In Capital	Private equity/credit performance metric measuring cumulative distributions returned to investors relative to capital contributed	(Preqin, 2025)
+DSCR	Debt Service Coverage Ratio	Financial ratio measuring a borrower's cash flow available to service debt obligations; key underwriting metric in private credit	(Moody's, 2026)
+EBITDA	Earnings Before Interest, Taxes, Depreciation, and Amortization	Proxy for operating cash flow; primary metric used to assess borrower capacity and set leverage multiples in private credit underwriting	(Fitch Ratings, 2026)
+ESG	Environmental, Social, and Governance	Framework for evaluating sustainability and ethical impact of investments; increasingly integrated into private credit due diligence	(Brookfield Asset Management, 2025)
+GP	General Partner	Entity that manages a private fund, makes investment decisions, and typically receives management fees and carried interest	(S&P Global Market Intelligence, 2025b)
+IRR	Internal Rate of Return	Discount rate that makes the net present value of all cash flows equal to zero; standard metric for measuring private fund performance	(Preqin, 2025)
+LBO	Leveraged Buyout	Acquisition of a company using significant borrowed capital, often financed in part by private credit direct lending	(S&P Global Market Intelligence, 2025b)
+LP	Limited Partner	Institutional or accredited investor that commits capital to a private fund but has no role in day-to-day management	(S&P Global Market Intelligence, 2025b)
+LTV	Loan-to-Value	Ratio of loan amount to appraised value of collateral; key risk metric in asset-based private credit lending	(Moody's, 2026)
+MOIC	Multiple on Invested Capital	Performance metric calculated as total value (realized + unrealized) divided by invested capital; common in private markets reporting	(Preqin, 2025)
+NAV	Net Asset Value	Total value of a fund's assets minus liabilities, divided by outstanding shares; critical metric for BDCs and evergreen funds	(U.S. Securities and Exchange Commission, 2025)
+NDFI	Non-Depository Financial Institution	Financial entities that do not accept traditional deposits (e.g., private credit funds, hedge funds, BDCs); key counterparty for bank lending exposure	(Forbes, 2026)
+PE	Private Equity	Asset class involving direct investment in private companies or buyouts of public companies; often partners with private credit for capital structures	(S&P Global Market Intelligence, 2025b)
+PIK	Payment-in-Kind	Loan feature allowing borrowers to pay interest by issuing additional debt rather than cash; "bad PIKs" signal cash flow stress	(Forbes, 2025; Bloomberg News, 2025)
+RVPI	Residual Value to Paid-In Capital	Metric measuring unrealized value relative to capital contributed; indicates remaining potential value in a private fund	(Preqin, 2025)
+TMT	Technology, Media, and Telecom	Sector classification frequently targeted by private credit; currently facing elevated risk from AI disruption and valuation resets	(Seeking Alpha, 2026)
+TVPI	Total Value to Paid-In Capital	Sum of DPI and RVPI; comprehensive metric of fund performance including both realized and unrealized returns	(Preqin, 2025)
+XLF	Financial Select Sector SPDR Fund	ETF tracking the financial sector of the S&P 500; used as benchmark for financial sector performance	(Bloomberg News, 2026)
+YTD	Year-to-Date	Period from the beginning of the current calendar or fiscal year to the present date; common performance reporting timeframe	(S&P Global Market Intelligence, 2026)
+			
+			
+#Ticker Reference		
+			
+Ticker	Full Name	Type	Reference
+ARES	Ares Management Corporation	Public equity (NYSE)	(Investing.com, 2026)
+ARCC	Ares Capital Corporation	BDC (NASDAQ)	(U.S. Securities and Exchange Commission, 2025)
+BCRED	Blackstone Private Credit Fund	Non-traded BDC	(Private Debt Investor, 2025)
+KCAP	Kayne Anderson Acquisition Corp. (historical)	Former BDC structure	(GrowthCap Advisory, 2025)
+KREF	Kayne Anderson Real Estate Investment Trust	REIT (NYSE)	(GrowthCap Advisory, 2025)
+OBDC	Blue Owl Capital Corporation	BDC (NYSE)	(Bloomberg News, 2026)
+OXLC	Oxford Lane Capital Corp.	BDC (NASDAQ), managed by Blue Owl	(U.S. Securities and Exchange Commission, 2025)
+PSEC	Prospect Capital Corporation	BDC (NASDAQ)	(GrowthCap Advisory, 2025)
+
+
+#References
 Bloomberg News. (2026, February 28). Private credit stocks signal more pain is coming. Bloomberg. https://www.bloomberg.com/news/articles/2026-02-28/private-credit-stocks-signal-more-pain-is-coming-credit-weekly
 Fitch Ratings. (2025, December 22). Global private credit's burgeoning scale, complexity to continue in 2026. https://www.fitchratings.com/research/non-bank-financial-institutions/global-private-credits-burgeoning-scale-complexity-to-continue-in-2026-22-12-2025
 Fitch Ratings. (2026, March 6). US private credit defaults hit new highs but losses remain contained. https://www.fitchratings.com/research/corporate-finance/6336fcc7-8612-4276-98e2-f7b826c87ab3-06-03-2026
