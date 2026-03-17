@@ -12,7 +12,6 @@ Lets start building key indicators that would enable us to forecase exposure and
 
 
 #Glossary
-
 Abbreviation	Full Term	Definition	Reference
 ACFI	Alternative Credit and Fixed Income	Magnetar Capital's multi-strategy credit platform encompassing structured credit, distressed debt, and liquid credit strategies	(GrowthCap Advisory, 2025)
 AUM	Assets Under Management	Total market value of assets that a financial institution or fund manages on behalf of clients; key metric for firm scale	(S&P Global Market Intelligence, 2025b)
