@@ -1,5 +1,5 @@
-The Correlation between Private Credit Fears and Timing of Iran War: A Perspective 
-Awase Khirni Syed 
+#The Correlation between Private Credit Fears and Timing of Iran War: A Perspective 
+#Awase Khirni Syed 
 
 On Feb 25, 2026, an article was published by Swiss Info: "Private credit fears deepens with UBS warning of 15% defaults." This is what the global elite wanted. They wanted this to shift the attention to this phase of financial crisis brewing. The ground work for this has been laid on the S&P Global Market Intelligence Reports, where they have highlighted and marked the "Early Phase of Financial Crisis like in 2008, but much worse." Now let us start building the key indicators that will enable us to forecast and develop a strategy.
 
