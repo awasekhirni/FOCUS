@@ -1,0 +1,225 @@
+{
+  "Global_AML_Models_Algorithms_and_Frameworks_Compendium": {
+    "Document_Metadata": {
+      "Version": "4.0.0",
+      "Release_Date": "2026-09-16",
+      "Scope": "End-to-End AML, CFT, and Sanctions Compliance: Bridging Computational Data Science, Econometrics, Behavioral Economics, and Critical Policy Analysis",
+      "Total_Models_Cataloged": "140+",
+      "Research_Basis": "Synthesis of Tier-1 Global Banking AI/ML implementations, Academic Econometric Literature, and 'The Critical Handbook of Money Laundering' (Van Duyne, Harvey, Gelemerova)",
+      "Key_Enhancements": "Integration of critical political economy models, macroeconomic shadow-economy estimators, behavioral game theory, and critical sociological frameworks alongside traditional computer science algorithms."
+    },
+    "Part_1_Computational_AI_and_Machine_Learning_Algorithms": {
+      "1_Supervised_Tree_Ensembles": {
+        "algorithms": ["XGBoost", "LightGBM", "CatBoost", "Random Forest", "Extra Trees", "Gradient Boosting Machines (GBM)", "AdaBoost", "Explainable Boosting Machines (EBM)"],
+        "primary_use_cases": ["SAR/STR prediction", "Alert prioritization", "Supervised typology detection"],
+        "mechanism": "Ensemble tree-based learning handling non-linear, high-dimensional tabular data.",
+        "datasets": ["IEEE-CIS Fraud", "PaySim", "Internal Bank SAR logs"],
+        "benchmarks": ["PR-AUC > 0.85", "F1-Score > 0.70"],
+        "risks": ["Concept drift", "Overfitting to historical typologies", "Black-box nature requires XAI"]
+      },
+      "2_Classic_Supervised_Classifiers": {
+        "algorithms": ["Logistic Regression", "Support Vector Machines (SVM)", "Linear/Quadratic Discriminant Analysis", "Gaussian/Multinomial Naive Bayes", "K-Nearest Neighbors (KNN)"],
+        "primary_use_cases": ["Baseline classification", "Highly explainable alert scoring", "Probabilistic risk tiering"],
+        "mechanism": "Statistical and distance-based classification boundaries.",
+        "risks": ["Struggles with complex non-linear interactions", "Sensitive to feature scaling"]
+      },
+      "3_Deep_Learning_Tabular_Sequence_and_Time_Series": {
+        "algorithms": ["Multi-Layer Perceptron (MLP)", "Deep Neural Networks (DNN)", "Convolutional Neural Networks (CNN)", "Recurrent Neural Networks (RNN)", "Long Short-Term Memory (LSTM)", "Gated Recurrent Units (GRU)", "Temporal Convolutional Networks (TCN)", "Tabular Transformers", "Informer", "Autoformer"],
+        "primary_use_cases": ["Complex pattern recognition in transaction sequences", "Behavioral biometrics", "Time-series anomaly detection"],
+        "mechanism": "Deep hierarchical feature extraction and temporal dependency modeling.",
+        "risks": ["High computational cost", "Requires massive labeled data", "Extreme black-box nature"]
+      },
+      "4_Unsupervised_Anomaly_and_Density_Detection": {
+        "algorithms": ["Isolation Forest", "Local Outlier Factor (LOF)", "One-Class SVM", "DBSCAN", "OPTICS", "Mean Shift", "Robust Covariance", "Stochastic Outlier Selection (SOS)"],
+        "primary_use_cases": ["Detecting novel/unknown ML typologies", "Unsupervised alert generation"],
+        "mechanism": "Isolating anomalies via random partitioning or measuring local density deviation.",
+        "risks": ["High false positives", "Difficult to explain to regulators"]
+      },
+      "5_Deep_Generative_and_Reconstruction_Anomaly": {
+        "algorithms": ["Autoencoders (AE)", "Variational Autoencoders (VAE)", "Generative Adversarial Networks (GANs)", "Diffusion Models", "Denoising Autoencoders"],
+        "primary_use_cases": ["Reconstruction error-based anomaly detection", "Generating synthetic AML data for model training"],
+        "mechanism": "Learning latent representations; anomalies yield high reconstruction errors.",
+        "risks": ["GANs suffer from mode collapse", "VAEs can produce blurry reconstructions"]
+      },
+      "6_NLP_Semantic_Similarity_and_Transformers": {
+        "algorithms": ["Cosine Similarity (TF-IDF)", "Jaccard", "Okapi BM25", "Word2Vec", "GloVe", "FastText", "BERT", "RoBERTa", "ALBERT", "DistilBERT", "Sentence-BERT", "GraphRAG"],
+        "primary_use_cases": ["Contextual disambiguation of PEPs/Sanctions", "Adverse media screening", "Automated SAR narrative generation"],
+        "mechanism": "Vector space modeling, dense word embeddings, and self-attention mechanisms.",
+        "risks": ["Hallucinations in GenAI", "Bias in pre-trained models", "High computational cost"]
+      },
+      "7_Graph_Neural_Networks_and_Community_Detection": {
+        "algorithms": ["GNN", "GraphSAGE", "GCN", "GAT", "Hypergraph NN", "Node2Vec", "DeepWalk", "Louvain", "Label Propagation", "PageRank", "Betweenness Centrality"],
+        "primary_use_cases": ["Detecting complex laundering syndicates", "Smurfing rings", "Finding key orchestrators"],
+        "mechanism": "Aggregating neighborhood features and modularity optimization for network topology.",
+        "risks": ["Extreme computational complexity", "Over-smoothing", "Regulatory explainability challenges"]
+      },
+      "8_Explainable_AI_XAI_and_Privacy_Enhancing_Techs": {
+        "algorithms": ["SHAP", "LIME", "Counterfactual Explanations (DiCE)", "Federated Learning", "Secure Multi-Party Computation (SMPC)", "Homomorphic Encryption", "Differential Privacy"],
+        "primary_use_cases": ["Regulatory model validation", "Cross-border AML model training without sharing raw data"],
+        "mechanism": "Game-theoretic explanations and cryptographic distributed computing.",
+        "risks": ["Computational overhead for PETs", "Approximation errors in XAI"]
+      }
+    },
+    "Part_2_Macroeconomic_and_Econometric_Models_Estimating_ML": {
+      "1_Currency_Demand_Approach": {
+        "authors": ["Cagan (1958)", "Guttman (1976)", "Feige (1979)", "Tanzi (1983)"],
+        "purpose": "Estimate the size of the shadow/hidden economy and ML by measuring excess cash holdings.",
+        "mechanism": "Assumes shadow transactions are carried out in cash. Compares actual currency demand to a predicted 'normal' demand equation controlling for income, interest rates, and tax burden.",
+        "proxies_used": ["Currency to money supply ratio (C/M2)", "Tax burden", "Interest rates"],
+        "critiques_and_limitations": ["Highly sensitive to model specification", "Fails to account for electronic payments", "Assumes all unexplained cash is illicit (ignores informal but legal economy)"]
+      },
+      "2_Physical_Input_Electricity_Approach": {
+        "authors": ["Kaufmann and Kaliberda (1996)"],
+        "purpose": "Measure overall economic activity (official + unofficial) to isolate the shadow economy.",
+        "mechanism": "Relies on the empirical correlation between electricity consumption and GDP (elasticity near unity). The difference between official GDP and electricity-based GDP indicates the shadow economy.",
+        "proxies_used": ["Electricity consumption", "Official GDP"],
+        "critiques_and_limitations": ["Decoupling of electricity use and GDP due to energy efficiency tech", "Does not differentiate between legal informal economy and criminal ML"]
+      },
+      "3_MIMIC_Multiple_Indicator_Multiple_Causes": {
+        "authors": ["Schneider (2006, 2010)"],
+        "purpose": "Estimate the value of an unobservable latent variable (ML/Organized Crime turnover).",
+        "mechanism": "Structural Equation Model (SEM) combining multiple observable causal variables (e.g., drug sales, tax burden) and indicator variables (e.g., confiscated money, prosecutions) to model the latent shadow economy.",
+        "proxies_used": ["Causal: Drug sales, illegal weapons, tax burden", "Indicators: Confiscated money, prosecutions"],
+        "critiques_and_limitations": ["Relies on flawed proxy data (e.g., Interpol crime stats)", "Definitional ambiguity of the latent variable", "Measurement uncertainty of causal variables"]
+      },
+      "4_DYMINIC_Dynamic_MIMIC": {
+        "authors": ["Chong and López-de-Silanes (2007)"],
+        "purpose": "Determine explanatory variables for the size of the shadow economy and ML regulation impact.",
+        "mechanism": "Extension of factor analysis incorporating subjective 'opinion data' (Likert scales from surveys) and regulatory measures alongside macroeconomic data.",
+        "proxies_used": ["Subjective survey data", "Asset confiscation rates", "Financial disclosure indices"],
+        "critiques_and_limitations": ["Subjectivity in scoring and Likert scales", "Overlaps between underground economy, tax evasion, and crime"]
+      },
+      "5_Modified_Cash_Deposit_Ratio_MCDR": {
+        "authors": ["Pickhardt and Pons (2011)"],
+        "purpose": "Correct mis-specification errors in the currency demand approach.",
+        "mechanism": "Alternative econometric approach focusing on cash deposits into the financial system to isolate the 'cash' component entering banks, establishing a lower bound for early-stage ML (placement).",
+        "proxies_used": ["Cash deposits", "Bank balance sheets"],
+        "critiques_and_limitations": ["Excludes financial/economic crime where cash plays a subordinate role", "Requires strong modifying assumptions"]
+      },
+      "6_Input_Output_Matrix": {
+        "authors": ["Walker (1995)"],
+        "purpose": "Bottom-up computational modeling of the generation and flow of ML proceeds across sectors/countries.",
+        "mechanism": "Uses national crime victim surveys and police data to estimate proceeds per crime type, then maps flows through an input-output economic matrix.",
+        "critiques_and_limitations": ["Relies on highly deficient initial survey data (e.g., only 9 expert respondents in original model)", "Prone to double counting", "Lacks statistical robustness"]
+      }
+    },
+    "Part_3_Gravity_and_Trade_Based_Models": {
+      "1_Walker_Gravity_Model": {
+        "authors": ["Walker (1995, 1999)", "Walker and Unger (2009)"],
+        "purpose": "Model global ML flows based on country attractiveness and distance deterrence.",
+        "mechanism": "Calculates flows using: (Quantity generated in Country X) * (Attractiveness of Country Y / Distance between X and Y). Attractiveness is scored via bank secrecy, gov attitude, SWIFT membership, corruption.",
+        "proxies_used": ["Bank secrecy indices", "Corruption perception", "Colonial/language ties"],
+        "critiques_and_limitations": ["Built on flawed, unverified initial survey data", "Hypothetical attractiveness scores", "Fails to prevent double counting of funds"]
+      },
+      "2_Traditional_Gravity_Model_of_Trade": {
+        "authors": ["Tinbergen (1962)", "Ferwerda et al. (2011)"],
+        "purpose": "Test for Trade-Based Money Laundering (TBML) by analyzing bilateral trade flows.",
+        "mechanism": "Adapts international trade models (GDP, population, distance) to find abnormal pricing or capital flight disguised as trade.",
+        "critiques_and_limitations": ["Counter-intuitive findings (e.g., strong AML measures correlating with more TBML due to displacement)", "Relies on impure national customs databases"]
+      },
+      "3_Statistical_Profiling_for_TBML": {
+        "authors": ["Zdanowicz (2009)"],
+        "purpose": "Detect over/under-invoicing in trade finance.",
+        "mechanism": "Compares the country average price of an exported product with the world average price using standardized commodity codes to identify abnormal pricing mismatches.",
+        "critiques_and_limitations": ["Cannot distinguish between ML, capital flight, or legitimate market variations", "Relies on pure national/international databases which are often flawed"]
+      },
+      "4_Portfolio_Models": {
+        "authors": ["De Boyrie et al. (2005)"],
+        "purpose": "Model abnormal pricing in trade flows to detect capital flight/ML.",
+        "mechanism": "Analyzes bilateral trade data (e.g., Switzerland/USA) to see if ML legislation increases false invoicing activity.",
+        "critiques_and_limitations": ["Assumes trade is the only conduit for capital flight", "Ignores financial sector routing"]
+      }
+    },
+    "Part_4_Microeconomic_and_Behavioral_Models": {
+      "1_Expected_Utility_Rational_Choice": {
+        "authors": ["Becker (1968)", "Masciandaro (1998, 1999)", "Yaniv (1999)", "Ferwerda (2009)"],
+        "purpose": "Model the criminal as a rational cost-benefit calculator (Homo economicus).",
+        "mechanism": "Criminal profit formula: ML demand is negatively correlated with the cost of laundering services, probability of detection, and severity of sanctions. Utility increases as expected return increases.",
+        "critiques_and_limitations": ["Assumes perfect rationality and foresight", "Ignores emotional/impulsive drivers of crime", "Fails to account for 'canned laundering' where crime and ML are inseparable"]
+      },
+      "2_Principal_Agent_Game_Theory": {
+        "authors": ["Araujo (2008, 2010)", "Masciandaro and Filotto (2001)", "Takáts (2011)"],
+        "purpose": "Model the asymmetric information relationship between the Regulator (Principal) and the Bank (Agent).",
+        "mechanism": "Banks will only invest in AML compliance up to the point where compliance costs equal the expected fines for non-compliance. Explores 'carrots vs sticks' and defensive reporting.",
+        "critiques_and_limitations": ["Overlooks the social/reputational costs of non-compliance", "Assumes regulators have perfect oversight", "Fails to explain 'interpretation risk' where banks de-risk to avoid ambiguity"]
+      },
+      "3_Bargaining_Theory": {
+        "authors": ["Rubinstein (1982)", "McCarthy et al. (2015)"],
+        "purpose": "Model non-cooperative situations and agreements in the laundering chain.",
+        "mechanism": "Analyzes the separation of the predicate offender and the third-party launderer, modeling their negotiations and risk-sharing regarding detection probabilities.",
+        "critiques_and_limitations": ["Highly theoretical", "Rarely maps to actual empirical criminal networks"]
+      },
+      "4_Dynamic_General_Equilibrium_Models": {
+        "authors": ["Argentiero et al. (2008)", "Barone and Masciandaro (2011)"],
+        "purpose": "Model the interaction between legitimate and criminal economic sectors.",
+        "mechanism": "Shows how criminal activity might act as a 'buffer' during economic downturns. Criminals face transaction costs (sanctions risk) to move money into the legal sector.",
+        "critiques_and_limitations": ["Overly abstract", "Relies on inferred elasticity/volatility relationships rather than observed data"]
+      },
+      "5_Partial_Equilibrium_Models": {
+        "authors": ["Gnutzmann et al. (2010)"],
+        "purpose": "Explore why some countries tolerate ML (externalizing costs while capturing investment benefits).",
+        "mechanism": "Models the 'exchange rate' between clean and dirty money. Small developing countries 'dance with the devil' because they have less to lose in legitimate global finance.",
+        "critiques_and_limitations": ["Assumes criminal earnings can only be consumed once laundered", "Ignores indirect costs of repressive regulation on society"]
+      }
+    },
+    "Part_5_Regulatory_Policy_and_Compliance_Frameworks": {
+      "1_FATF_Risk_Based_Approach_RBA_Formula": {
+        "authors": ["FATF (2007, 2013)"],
+        "purpose": "The overarching policy algorithm defining how institutions and nations allocate AML resources.",
+        "mechanism": "Risk = f(Threat, Vulnerability, Consequence). Resources should be commensurate to risk.",
+        "critiques_and_limitations": ["FATF admits 'Consequence' is too hard to measure and allows countries to drop it", "Lack of standard definitions for Threat/Vulnerability", "Leads to 'defensive reporting' and 'interpretation risk' where banks over-report to avoid fines"]
+      },
+      "2_National_Risk_Assessment_NRA_Dome_Model": {
+        "authors": ["FATF", "Van Duyne et al. (Critical Analysis)"],
+        "purpose": "Top-down hierarchical policy model where a central authority identifies risks and forces lower-level institutions to derive their risk assessments from the national 'dome'.",
+        "mechanism": "Requires formal institutionalization, holistic understanding, and top-down resource allocation.",
+        "critiques_and_limitations": ["Creates an 'imperial' top-down structure", "Relies on 'holistic' (fuzzy) understanding rather than empirical statistics", "Biased towards unproven 'high risks' due to lack of consequence measurement"]
+      },
+      "3_Three_Lines_of_Defence_Model": {
+        "authors": ["Institute of Internal Auditors", "Verhage (2009)"],
+        "purpose": "Operational risk governance model used by banks.",
+        "mechanism": "1st Line: Revenue generators/KYC. 2nd Line: MLRO/Financial Crime Compliance. 3rd Line: Internal Audit.",
+        "critiques_and_limitations": ["Creates silos", "Shifts external regulatory costs onto the private sector without corresponding benefits"]
+      },
+      "4_De_risking_Risk_Avoidance_Routine": {
+        "authors": ["Gelemerova et al. (2018)", "The Economist (2017)"],
+        "purpose": "Behavioral model describing how banks react to regulatory uncertainty and 'interpretation risk'.",
+        "mechanism": "Instead of applying the RBA, banks bypass the risk assessment by terminating relationships with entire classes of clients (e.g., PEPs, NGOs, remittance firms) to avoid fines.",
+        "critiques_and_limitations": ["Defeats the purpose of financial inclusion", "Driven by fear of regulators rather than actual ML risk"]
+      },
+      "5_Canned_Laundering_Typology": {
+        "authors": ["Van Duyne (2003, 2005)"],
+        "purpose": "Conceptual model describing economic crimes where the modus operandi of the predicate crime simultaneously acts as the instrument of laundering.",
+        "mechanism": "E.g., Tax fraud or environmental crime. The forged tax return or fake invoice is the 'can' that already contains the laundering. The money is 'clean in the can' upon creation.",
+        "critiques_and_limitations": ["Challenges the traditional 3-stage ML model (Placement, Layering, Integration)", "Highlights the absurdity of separating predicate offences from ML in corporate crime"]
+      }
+    },
+    "Part_6_Sociological_and_Critical_Theories": {
+      "1_Problematisation_and_Claims_Making": {
+        "authors": ["Hulsse (2007, 2008)", "Nichols (1997)"],
+        "purpose": "Explain how ML became a global political 'problem' requiring a massive compliance industry.",
+        "mechanism": "ML was socially constructed through 'claims-making' by policy makers and media, transforming 'non-reporting' into a global threat narrative to justify expanding state surveillance and the compliance market.",
+        "critiques_of_regime": ["The threat imagery is maintained to sustain the compliance industry's revenue", "Lack of empirical evidence of ML threatening financial stability is ignored"]
+      },
+      "2_Indirect_Rule_Imperial_Model": {
+        "authors": ["Van Duyne, Harvey, Gelemerova", "Goldbarsht and Michaelsen (2017)"],
+        "purpose": "Analyze the FATF's geopolitical power and lack of democratic legitimacy.",
+        "mechanism": "The FATF acts like a colonial power using 'indirect rule'. It sets standards and uses the threat of blacklisting (the 'gunboat') to force sovereign nations to adopt its rules, overriding local parliaments and judiciaries.",
+        "critiques_of_regime": ["FATF acts as investigator, judge, and executioner", "Violates the principle of subsidiarity and national sovereignty", "Imposes 'effective, proportionate and dissuasive' sentencing mandates on independent courts"]
+      },
+      "3_Threat_Assessment_Industry_Complex": {
+        "authors": ["Verhage (2011)", "Van Duyne (2004)"],
+        "purpose": "Map the commercial ecosystem that profits from the AML regime.",
+        "mechanism": "Regulators, consultants, and software vendors form a symbiotic 'complex'. Consultants scaremonger about threats, sell software to banks, and act as monitors for fined banks, creating a perpetual cycle of compliance spending.",
+        "critiques_of_regime": ["Compliance costs are passed to consumers", "Focus is on 'tick-box' formal compliance rather than actual crime reduction"]
+      }
+    },
+    "Strategic_Implementation_and_Data_Governance_Alignment": {
+      "Data_Domain_Scope": "Hub-and-spoke / Data Mesh model integrating Corporate, Investment, Wealth, and GBM data via Data Contracts.",
+      "Critical_Data_Elements": ["Customer ID", "Transaction Timestamp", "UBO/LEI", "Counterparty Details", "Alert Generation Date", "Purpose of Payment"],
+      "DQ_Rules": "Completeness (FATF Travel Rule), Accuracy (GL Reconciliation), Timeliness (T+1 or Real-time), Consistency (Cross-domain UBO matching).",
+      "Remediation_Plans": ["Fix at Source (Data Contracts)", "Transform in Flight (ETL)", "Alert Suppression & Risk Adjustment"],
+      "Regulatory_Alignment": ["FATF Recommendations", "EU AI Act (High-Risk AI)", "ISO 42001", "Basel Committee Operational Resilience", "SR 11-7 / SS1/23"]
+    }
+  }
+}
